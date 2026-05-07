@@ -1,0 +1,26 @@
+# PostgreSQL pour développement local
+# Lancement : `docker compose up -d`
+# Arrêt : `docker compose down`
+# Reset complet : `docker compose down -v` (supprime les données)
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: chantiers_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ludimmo
+      POSTGRES_PASSWORD: ludimmo_dev
+      POSTGRES_DB: chantiers_essaouira
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ludimmo -d chantiers_essaouira"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:

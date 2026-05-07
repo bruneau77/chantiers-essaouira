@@ -1,0 +1,403 @@
+// Schéma Prisma — Chantiers Essaouira (version SQLite pour dev local)
+//
+// Différences vs version PostgreSQL :
+//   - provider = "sqlite"
+//   - Tous les enum convertis en String (SQLite ne supporte pas les enums Prisma)
+//   - La validation des valeurs autorisées se fait côté code (zod)
+//
+// Pour le déploiement en production sur le VPS, on utilisera PostgreSQL.
+// Voir docs/migration-postgres.md pour la procédure de bascule.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================
+// UTILISATEURS ET RÔLES
+// ============================================================
+// Role: 'admin' | 'chef' | 'sous_traitant' | 'client'
+
+model Utilisateur {
+  id              Int       @id @default(autoincrement())
+  email           String    @unique
+  motDePasseHash  String    @map("mot_de_passe_hash")
+  prenom          String
+  nom             String
+  telephone       String?
+  role            String    // 'admin' | 'chef' | 'sous_traitant' | 'client'
+  partDefautPct   Int       @default(50) @map("part_defaut_pct")
+  actif           Boolean   @default(true)
+  creeLe          DateTime  @default(now()) @map("cree_le")
+  modifieLe       DateTime  @updatedAt @map("modifie_le")
+
+  // Relations
+  chantiersChef       Chantier[]      @relation("ChefChantier")
+  chantiersClient     Chantier[]      @relation("ClientChantier")
+  chantiersSousTrait  Chantier[]      @relation("SousTraitantChantier")
+  avancesBeneficiaire Avance[]        @relation("BeneficiaireAvance")
+  refreshTokens       RefreshToken[]
+
+  @@map("utilisateurs")
+}
+
+model RefreshToken {
+  id            Int         @id @default(autoincrement())
+  token         String      @unique
+  utilisateurId Int         @map("utilisateur_id")
+  expireLe      DateTime    @map("expire_le")
+  creeLe        DateTime    @default(now()) @map("cree_le")
+
+  utilisateur   Utilisateur @relation(fields: [utilisateurId], references: [id], onDelete: Cascade)
+
+  @@map("refresh_tokens")
+}
+
+// ============================================================
+// PARAMÈTRES GLOBAUX
+// ============================================================
+// baseCommission: 'DEVIS' | 'MARGE'
+
+model Reglages {
+  id                       Int      @id @default(1)
+  // Voiture
+  vehiculeModele           String   @default("VW Touareg V6 TDI 2015-2016") @map("vehicule_modele")
+  consommationL100km       Float    @default(9.5) @map("consommation_l_100km")
+  prixGasoilCentimes       Int      @default(1150) @map("prix_gasoil_centimes")
+  usureCentimesParKm       Int      @default(80) @map("usure_centimes_par_km")
+  securiteAllerRetour      Int      @default(1) @map("securite_aller_retour")
+
+  // Échéancier
+  pctAcompte               Int      @default(30) @map("pct_acompte")
+  pctMiChantier            Int      @default(40) @map("pct_mi_chantier")
+  pctSolde                 Int      @default(30) @map("pct_solde")
+
+  // Relances
+  joursAvantRelanceAcompte Int      @default(7) @map("jours_avant_relance_acompte")
+
+  // Marge devis par défaut
+  margeDefautPct           Int      @default(15) @map("marge_defaut_pct")
+
+  // Commission
+  baseCommission           String   @default("DEVIS") @map("base_commission") // 'DEVIS' | 'MARGE'
+
+  // Entreprise
+  entrepriseNom            String   @default("Ludimmo Travaux") @map("entreprise_nom")
+  entrepriseAdresse        String   @default("480 Borj 1, 44010 Essaouira") @map("entreprise_adresse")
+  entrepriseTel            String   @default("+212 6 87 19 86 36") @map("entreprise_tel")
+  entrepriseEmail          String   @default("ludimmo.essaouira@gmail.com") @map("entreprise_email")
+
+  modifieLe                DateTime @updatedAt @map("modifie_le")
+
+  @@map("reglages")
+}
+
+// ============================================================
+// CHANTIERS
+// ============================================================
+// statut: 'prospect' | 'en_attente' | 'en_cours' | 'pause' | 'termine' | 'cloture' | 'annule'
+
+model Chantier {
+  id                Int             @id @default(autoincrement())
+  numero            String          @unique
+  titre             String
+  description       String?
+  adresseChantier   String          @map("adresse_chantier")
+
+  // Acteurs
+  chefId            Int             @map("chef_id")
+  clientId          Int             @map("client_id")
+  sousTraitantId    Int?            @map("sous_traitant_id")
+
+  chef              Utilisateur     @relation("ChefChantier", fields: [chefId], references: [id])
+  client            Utilisateur     @relation("ClientChantier", fields: [clientId], references: [id])
+  sousTraitant      Utilisateur?    @relation("SousTraitantChantier", fields: [sousTraitantId], references: [id])
+
+  // Statut
+  statut            String          @default("prospect")
+
+  // Distance et frais essence
+  distanceAllerKm        Int?         @map("distance_aller_km")
+  nombreAllerRetourPrevu Int?         @map("nombre_aller_retour_prevu")
+  fraisEssenceCentimes   Int          @default(0) @map("frais_essence_centimes")
+
+  // Partage spécifique
+  partChefPctSpecial Int?           @map("part_chef_pct_special")
+
+  // Dates
+  dateDebutPrevue    DateTime?      @map("date_debut_prevue")
+  dateFinPrevue      DateTime?      @map("date_fin_prevue")
+  dateDebutReelle    DateTime?      @map("date_debut_reelle")
+  dateFinReelle      DateTime?      @map("date_fin_reelle")
+
+  notes              String?
+
+  creeLe             DateTime       @default(now()) @map("cree_le")
+  modifieLe          DateTime       @updatedAt @map("modifie_le")
+
+  // Relations
+  devis              Devis[]
+  paiements          Paiement[]
+  avenants           Avenant[]
+  avances            Avance[]
+  photos             Photo[]
+  interventions      Intervention[]
+
+  @@map("chantiers")
+}
+
+// ============================================================
+// DEVIS
+// ============================================================
+// statut: 'brouillon' | 'envoye' | 'accepte' | 'refuse' | 'expire'
+
+model Devis {
+  id                  Int             @id @default(autoincrement())
+  chantierId          Int             @map("chantier_id")
+  numero              String          @unique
+  version             Int             @default(1)
+
+  statut              String          @default("brouillon")
+  dateEmission        DateTime        @default(now()) @map("date_emission")
+  validiteJours       Int             @default(30) @map("validite_jours")
+
+  // Totaux calculés (en centimes DH)
+  totalBrutCentimes   Int             @default(0) @map("total_brut_centimes")
+  totalClientCentimes Int             @default(0) @map("total_client_centimes")
+  margeMontantCentimes Int            @default(0) @map("marge_montant_centimes")
+
+  tempsTravailJours   Int?            @map("temps_travail_jours")
+  observations        String?
+
+  signeLe             DateTime?       @map("signe_le")
+
+  creeLe              DateTime        @default(now()) @map("cree_le")
+  modifieLe           DateTime        @updatedAt @map("modifie_le")
+
+  chantier            Chantier        @relation(fields: [chantierId], references: [id], onDelete: Cascade)
+  lignes              LigneDevis[]
+
+  @@map("devis")
+}
+
+// section: 'main_oeuvre' | 'materiel' | 'divers'
+// typeMesure: 'quantite' | 'surface_m2' | 'forfait' | 'unite_temps'
+
+model LigneDevis {
+  id                       Int           @id @default(autoincrement())
+  devisId                  Int           @map("devis_id")
+  ordre                    Int
+  section                  String
+
+  description              String
+  observation              String?
+
+  typeMesure               String        @default("quantite") @map("type_mesure")
+  quantite                 Float         @default(1)
+
+  // Logique double colonne
+  prixUnitaireBrutCentimes   Int         @map("prix_unitaire_brut_centimes")
+  margePct                   Int         @default(15) @map("marge_pct")
+  coutBrutCentimes           Int         @map("cout_brut_centimes")
+  prixUnitaireClientCentimes Int         @map("prix_unitaire_client_centimes")
+  coutClientCentimes         Int         @map("cout_client_centimes")
+  margeMontantCentimes       Int         @map("marge_montant_centimes")
+
+  // Lien optionnel au catalogue
+  materiauId               Int?          @map("materiau_id")
+  materiau                 Materiau?     @relation(fields: [materiauId], references: [id])
+
+  creeLe                   DateTime      @default(now()) @map("cree_le")
+
+  devis                    Devis         @relation(fields: [devisId], references: [id], onDelete: Cascade)
+
+  @@map("lignes_devis")
+}
+
+// ============================================================
+// AVENANTS
+// ============================================================
+
+model Avenant {
+  id                 Int       @id @default(autoincrement())
+  chantierId         Int       @map("chantier_id")
+  numero             String
+  description        String
+  montantBrutCentimes   Int    @map("montant_brut_centimes")
+  montantClientCentimes Int    @map("montant_client_centimes")
+  margeMontantCentimes  Int    @map("marge_montant_centimes")
+  dateAccord         DateTime  @default(now()) @map("date_accord")
+  notes              String?
+
+  chantier           Chantier  @relation(fields: [chantierId], references: [id], onDelete: Cascade)
+
+  @@map("avenants")
+}
+
+// ============================================================
+// PAIEMENTS
+// ============================================================
+// type: 'acompte' | 'mi_chantier' | 'solde' | 'avenant'
+// statut: 'attendu' | 'recu' | 'partiel' | 'en_retard'
+// moyen: 'virement' | 'cheque' | 'especes' | 'autre'
+
+model Paiement {
+  id                Int             @id @default(autoincrement())
+  chantierId        Int             @map("chantier_id")
+  type              String
+  pourcentage       Int
+  montantCentimes   Int             @map("montant_centimes")
+  statut            String          @default("attendu")
+  dateAttendue      DateTime?       @map("date_attendue")
+  dateRecue         DateTime?       @map("date_recue")
+  moyen             String?
+  reference         String?
+  notes             String?
+
+  creeLe            DateTime        @default(now()) @map("cree_le")
+  modifieLe         DateTime        @updatedAt @map("modifie_le")
+
+  chantier          Chantier        @relation(fields: [chantierId], references: [id], onDelete: Cascade)
+
+  @@map("paiements")
+}
+
+// ============================================================
+// AVANCES (sous-traitants ET distributeurs)
+// ============================================================
+// type: 'sous_traitant' | 'distributeur' | 'restaurant' | 'autre'
+// statut: 'en_attente_remboursement' | 'remboursee' | 'imputee_part_rachid'
+
+model Avance {
+  id                Int           @id @default(autoincrement())
+  chantierId        Int?          @map("chantier_id")
+  type              String
+  beneficiaireId    Int?          @map("beneficiaire_id")
+  beneficiaireNom   String?       @map("beneficiaire_nom")
+  fournisseurId     Int?          @map("fournisseur_id")
+
+  montantCentimes   Int           @map("montant_centimes")
+  dateAvance        DateTime      @default(now()) @map("date_avance")
+  description       String
+  justificatif      String?
+
+  statut            String        @default("en_attente_remboursement")
+  dateRemboursement DateTime?     @map("date_remboursement")
+
+  creeLe            DateTime      @default(now()) @map("cree_le")
+
+  chantier          Chantier?     @relation(fields: [chantierId], references: [id])
+  beneficiaire      Utilisateur?  @relation("BeneficiaireAvance", fields: [beneficiaireId], references: [id])
+  fournisseur       Fournisseur?  @relation(fields: [fournisseurId], references: [id])
+
+  @@map("avances")
+}
+
+// ============================================================
+// CATALOGUE MATÉRIAUX ET FOURNISSEURS
+// ============================================================
+
+model Fournisseur {
+  id                Int           @id @default(autoincrement())
+  nom               String
+  contact           String?
+  telephone         String?
+  email             String?
+  adresse           String?
+  notes             String?
+  actif             Boolean       @default(true)
+
+  creeLe            DateTime      @default(now()) @map("cree_le")
+
+  materiaux         Materiau[]
+  avances           Avance[]
+  prixHistoriques   PrixHistorique[]
+
+  @@map("fournisseurs")
+}
+
+// categorie: 'ciment_sable_chaux' | 'carrelage_revetement' | 'peinture_enduit'
+//          | 'bois_charpente' | 'electricite' | 'plomberie' | 'sanitaire'
+//          | 'outillage' | 'divers'
+
+model Materiau {
+  id                Int               @id @default(autoincrement())
+  nom               String
+  categorie         String
+  uniteMesure       String            @default("unité") @map("unite_mesure")
+  fournisseurId     Int?              @map("fournisseur_id")
+
+  prixActuelCentimes Int              @map("prix_actuel_centimes")
+
+  notes             String?
+  actif             Boolean           @default(true)
+
+  creeLe            DateTime          @default(now()) @map("cree_le")
+  modifieLe         DateTime          @updatedAt @map("modifie_le")
+
+  fournisseur       Fournisseur?      @relation(fields: [fournisseurId], references: [id])
+  lignesDevis       LigneDevis[]
+  prixHistoriques   PrixHistorique[]
+
+  @@map("materiaux")
+}
+
+model PrixHistorique {
+  id                Int             @id @default(autoincrement())
+  materiauId        Int             @map("materiau_id")
+  fournisseurId     Int?            @map("fournisseur_id")
+  prixCentimes      Int             @map("prix_centimes")
+  dateReleve        DateTime        @default(now()) @map("date_releve")
+  notes             String?
+
+  materiau          Materiau        @relation(fields: [materiauId], references: [id], onDelete: Cascade)
+  fournisseur       Fournisseur?    @relation(fields: [fournisseurId], references: [id])
+
+  @@map("prix_historiques")
+}
+
+// ============================================================
+// PLANNING ET INTERVENTIONS
+// ============================================================
+// type: 'visite_site' | 'livraison_materiel' | 'intervention_chantier'
+//     | 'reception_travaux' | 'rdv_client'
+
+model Intervention {
+  id                Int               @id @default(autoincrement())
+  chantierId        Int               @map("chantier_id")
+  type              String
+  titre             String
+  description       String?
+  dateDebut         DateTime          @map("date_debut")
+  dateFin           DateTime          @map("date_fin")
+  participants      String?           // JSON array sérialisé
+  statut            String            @default("prevue")
+
+  creeLe            DateTime          @default(now()) @map("cree_le")
+
+  chantier          Chantier          @relation(fields: [chantierId], references: [id], onDelete: Cascade)
+
+  @@map("interventions")
+}
+
+// ============================================================
+// PHOTOS CHANTIER
+// ============================================================
+
+model Photo {
+  id                Int           @id @default(autoincrement())
+  chantierId        Int           @map("chantier_id")
+  cheminFichier     String        @map("chemin_fichier")
+  titre             String?
+  description       String?
+  prisLe            DateTime?     @map("pris_le")
+  uploadeLe         DateTime      @default(now()) @map("uploade_le")
+
+  chantier          Chantier      @relation(fields: [chantierId], references: [id], onDelete: Cascade)
+
+  @@map("photos")
+}

@@ -1,0 +1,46 @@
+# Configuration Caddy pour Chantiers Essaouira
+#
+# Tant que tu n'as pas de domaine, utilise ton IP VPS (Caddy ne fera pas
+# de HTTPS automatique sur IP — on passera en HTTP simple pour le moment).
+#
+# Quand tu auras un domaine, remplace `:80` par `chantiers.tondomaine.com`
+# et Caddy obtiendra automatiquement un certificat Let's Encrypt.
+
+# === MODE TEMPORAIRE : IP VPS ===
+:80 {
+  # Frontend SvelteKit (Node) sur 3001
+  handle /api/* {
+    reverse_proxy localhost:3000
+  }
+
+  handle /uploads/* {
+    reverse_proxy localhost:3000
+  }
+
+  handle {
+    reverse_proxy localhost:3001
+  }
+
+  encode gzip zstd
+
+  log {
+    output file /var/log/caddy/chantiers.log
+  }
+}
+
+# === MODE FUTUR (avec domaine) — décommente et adapte ===
+# chantiers.tondomaine.com {
+#   handle /api/* {
+#     reverse_proxy localhost:3000
+#   }
+#   handle /uploads/* {
+#     reverse_proxy localhost:3000
+#   }
+#   handle {
+#     reverse_proxy localhost:3001
+#   }
+#   encode gzip zstd
+#   log {
+#     output file /var/log/caddy/chantiers.log
+#   }
+# }
