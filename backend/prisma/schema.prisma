@@ -1,12 +1,22 @@
-// Schéma Prisma — Chantiers Essaouira (version SQLite pour dev local)
+// Schéma Prisma — Chantiers Essaouira
 //
-// Différences vs version PostgreSQL :
-//   - provider = "sqlite"
-//   - Tous les enum convertis en String (SQLite ne supporte pas les enums Prisma)
-//   - La validation des valeurs autorisées se fait côté code (zod)
+// Refonte Lieu / Poste / Paiement (session 2026-05-18, voir docs/JOURNAL.md
+// entrée du 2026-05-17 pour le cadrage métier complet).
 //
-// Pour le déploiement en production sur le VPS, on utilisera PostgreSQL.
-// Voir docs/migration-postgres.md pour la procédure de bascule.
+// Modélisation à trois niveaux : CLIENT → LIEU → POSTE
+//   - CLIENT : un Utilisateur avec role='client'
+//   - LIEU   : un bien immobilier où Ludimmo intervient en continu
+//              (1 client → N lieux, 1 lieu → 1 client)
+//   - POSTE  : une intervention chiffrée sur un Lieu (ex: "3 tables marbre",
+//              "contrôle piscine"). 1 Poste = 1 ligne de devis unique.
+//              Les Paiements sont rattachés au Poste, libres au fil de l'eau
+//              (pas d'échéancier 30/40/30).
+//
+// SQLite pour dev local :
+//   - Pas d'enum Prisma natif → toutes les énumérations sont en `String`
+//     avec validation zod côté routes. Les valeurs autorisées sont
+//     documentées en commentaire au-dessus de chaque champ concerné.
+//   - Pour le déploiement production sur le VPS, on basculera sur PostgreSQL.
 
 generator client {
   provider = "prisma-client-js"
@@ -20,46 +30,47 @@ datasource db {
 // ============================================================
 // UTILISATEURS ET RÔLES
 // ============================================================
-// Role: 'admin' | 'chef' | 'sous_traitant' | 'client'
+// role: 'admin' | 'chef' | 'client'
+//   (le rôle 'sous_traitant' a été retiré en V1 : Rachid est 'chef',
+//   pas de modélisation distincte des sous-traitants ouvriers)
+//
+// email et motDePasseHash sont optionnels :
+//   - un client créé via la modale du formulaire Lieu peut ne pas avoir
+//     d'email (saisie facultative)
+//   - un compte sans motDePasseHash ne peut PAS se connecter (garde
+//     dans routes/auth.js POST /login → 401 identifiants incorrects,
+//     message générique pour ne pas révéler l'existence du compte)
+// En SQLite, plusieurs NULL ne sont pas considérés égaux pour UNIQUE,
+// donc l'unicité de l'email reste assurée pour les non-null.
 
 model Utilisateur {
   id              Int       @id @default(autoincrement())
-  // email et motDePasseHash sont optionnels :
-  //   - un client créé via le formulaire chantier peut ne pas avoir d'email
-  //     (saisie facultative)
-  //   - un compte sans motDePasseHash ne peut PAS se connecter (garde dans
-  //     routes/auth.js POST /login → 401 identifiants incorrects, message
-  //     générique pour ne pas révéler l'existence du compte)
-  // En SQLite, plusieurs valeurs NULL ne sont pas considérées comme égales
-  // pour UNIQUE, donc l'unicité de l'email reste assurée pour les non-null.
   email           String?   @unique
   motDePasseHash  String?   @map("mot_de_passe_hash")
   prenom          String
   nom             String
   telephone       String?
-  // Champs commerciaux (principalement pour les clients, mais disponibles
-  // sur tout utilisateur)
   adresse         String?
   notes           String?
-  role            String    // 'admin' | 'chef' | 'sous_traitant' | 'client'
+  role            String    // 'admin' | 'chef' | 'client'
   partDefautPct   Int       @default(50) @map("part_defaut_pct")
   actif           Boolean   @default(true)
   creeLe          DateTime  @default(now()) @map("cree_le")
   modifieLe       DateTime  @updatedAt @map("modifie_le")
 
-  // Relations
-  chantiersChef       Chantier[]      @relation("ChefChantier")
-  chantiersClient     Chantier[]      @relation("ClientChantier")
-  chantiersSousTrait  Chantier[]      @relation("SousTraitantChantier")
-  avancesBeneficiaire Avance[]        @relation("BeneficiaireAvance")
-  refreshTokens       RefreshToken[]
+  // Relations Lieu
+  lieuxChef       Lieu[]    @relation("ChefLieu")
+  lieuxClient     Lieu[]    @relation("ClientLieu")
 
-  // Compta — dépenses & budgets chantier
-  depensesSaisies     Depense[]        @relation("DepenseSaisiePar")
-  depensesValidees    Depense[]        @relation("DepenseValideePar")
-  depensesCorrigees   Depense[]        @relation("DepenseCorrigeePar")
-  budgetsRecus        BudgetChantier[] @relation("BudgetDestinataire")
-  budgetsCrees        BudgetChantier[] @relation("BudgetCreePar")
+  // Auth
+  refreshTokens   RefreshToken[]
+
+  // Compta — dépenses & budgets
+  depensesSaisies   Depense[]    @relation("DepenseSaisiePar")
+  depensesValidees  Depense[]    @relation("DepenseValideePar")
+  depensesCorrigees Depense[]    @relation("DepenseCorrigeePar")
+  budgetsRecus      BudgetLieu[] @relation("BudgetDestinataire")
+  budgetsCrees      BudgetLieu[] @relation("BudgetCreePar")
 
   @@map("utilisateurs")
 }
@@ -79,32 +90,23 @@ model RefreshToken {
 // ============================================================
 // PARAMÈTRES GLOBAUX
 // ============================================================
-// baseCommission: 'DEVIS' | 'MARGE'
+// Purgé en session 2026-05-18 : suppression des champs liés à
+// l'échéancier 30/40/30 (pctAcompte, pctMiChantier, pctSolde,
+// joursAvantRelanceAcompte), à la marge auto (margeDefautPct) et au
+// partage Yassine/Rachid (baseCommission). Ces logiques ne sont pas
+// en V1 du nouveau modèle.
 
 model Reglages {
   id                       Int      @id @default(1)
-  // Voiture
+
+  // Véhicule (frais kilométriques — formule dans lib/fraisKm.js)
   vehiculeModele           String   @default("VW Touareg V6 TDI 2015-2016") @map("vehicule_modele")
   consommationL100km       Float    @default(9.5) @map("consommation_l_100km")
   prixGasoilCentimes       Int      @default(1150) @map("prix_gasoil_centimes")
   usureCentimesParKm       Int      @default(80) @map("usure_centimes_par_km")
   securiteAllerRetour      Int      @default(1) @map("securite_aller_retour")
 
-  // Échéancier
-  pctAcompte               Int      @default(30) @map("pct_acompte")
-  pctMiChantier            Int      @default(40) @map("pct_mi_chantier")
-  pctSolde                 Int      @default(30) @map("pct_solde")
-
-  // Relances
-  joursAvantRelanceAcompte Int      @default(7) @map("jours_avant_relance_acompte")
-
-  // Marge devis par défaut
-  margeDefautPct           Int      @default(15) @map("marge_defaut_pct")
-
-  // Commission
-  baseCommission           String   @default("DEVIS") @map("base_commission") // 'DEVIS' | 'MARGE'
-
-  // Entreprise
+  // Entreprise (en-tête PDF, signatures, etc.)
   entrepriseNom            String   @default("Ludimmo Travaux") @map("entreprise_nom")
   entrepriseAdresse        String   @default("480 Borj 1, 44010 Essaouira") @map("entreprise_adresse")
   entrepriseTel            String   @default("+212 6 87 19 86 36") @map("entreprise_tel")
@@ -116,319 +118,214 @@ model Reglages {
 }
 
 // ============================================================
-// CHANTIERS
+// LIEU — un bien immobilier où Ludimmo intervient en continu
 // ============================================================
-// statut: 'prospect' | 'en_attente' | 'en_cours' | 'pause' | 'termine' | 'cloture' | 'annule'
+// statut: 'PROSPECT' | 'EN_COURS' | 'TERMINE'
+//
+// Le statut est une colonne stockée mais calculée par le backend à
+// partir de l'état des Postes rattachés (cf. service de recalcul
+// dans routes/postes.js et la route admin cachée
+// POST /api/admin/recalculer-statuts). Règles :
+//   - PROSPECT  : aucun Poste, OU tous les Postes sont A_FAIRE
+//   - EN_COURS  : au moins un Poste EN_COURS, OU mix A_FAIRE/TERMINE
+//   - TERMINE   : tous les Postes sont TERMINE (et il y en a au moins un)
+//
+// La référence L-2026-NNN est générée côté backend (compteur annuel).
 
-model Chantier {
-  id                Int             @id @default(autoincrement())
-  numero            String          @unique
-  titre             String
-  description       String?
-  adresseChantier   String          @map("adresse_chantier")
+model Lieu {
+  id                      Int       @id @default(autoincrement())
+  reference               String    @unique
+  nom                     String
 
   // Acteurs
-  chefId            Int             @map("chef_id")
-  clientId          Int             @map("client_id")
-  sousTraitantId    Int?            @map("sous_traitant_id")
+  clientId                Int       @map("client_id")
+  chefId                  Int?      @map("chef_id")
 
-  chef              Utilisateur     @relation("ChefChantier", fields: [chefId], references: [id])
-  client            Utilisateur     @relation("ClientChantier", fields: [clientId], references: [id])
-  sousTraitant      Utilisateur?    @relation("SousTraitantChantier", fields: [sousTraitantId], references: [id])
+  client                  Utilisateur  @relation("ClientLieu", fields: [clientId], references: [id])
+  chef                    Utilisateur? @relation("ChefLieu", fields: [chefId], references: [id])
 
-  // Statut
-  statut            String          @default("prospect")
+  // Adresse précise du lieu (libre, peut différer de l'adresse du client)
+  adresse                 String
 
-  // Distance et frais essence
-  distanceAllerKm        Int?         @map("distance_aller_km")
-  nombreAllerRetourPrevu Int?         @map("nombre_aller_retour_prevu")
-  fraisEssenceCentimes   Int          @default(0) @map("frais_essence_centimes")
+  // Budget estimatif (informatif uniquement, pas un engagement)
+  budgetEstimatifCentimes Int?      @map("budget_estimatif_centimes")
 
-  // Partage spécifique
-  partChefPctSpecial Int?           @map("part_chef_pct_special")
+  // Statut calculé (cf. règles en en-tête de modèle)
+  statut                  String    @default("PROSPECT")
 
-  // Dates
-  dateDebutPrevue    DateTime?      @map("date_debut_prevue")
-  dateFinPrevue      DateTime?      @map("date_fin_prevue")
-  dateDebutReelle    DateTime?      @map("date_debut_reelle")
-  dateFinReelle      DateTime?      @map("date_fin_reelle")
+  // Frais kilométriques — calculés selon Reglages au create/update du Lieu
+  distanceAllerKm         Int?      @map("distance_aller_km")
+  nombreAllerRetourPrevu  Int?      @map("nombre_aller_retour_prevu")
+  fraisEssenceCentimes    Int       @default(0) @map("frais_essence_centimes")
 
-  notes              String?
+  notes                   String?
 
-  creeLe             DateTime       @default(now()) @map("cree_le")
-  modifieLe          DateTime       @updatedAt @map("modifie_le")
+  creeLe                  DateTime  @default(now()) @map("cree_le")
+  modifieLe               DateTime  @updatedAt @map("modifie_le")
 
-  // Relations
-  devis              Devis[]
-  paiements          Paiement[]
-  avenants           Avenant[]
-  avances            Avance[]
-  photos             Photo[]
-  interventions      Intervention[]
-  depenses           Depense[]
-  budgets            BudgetChantier[]
+  // Relations — onDelete:
+  //   Postes:        Restrict (un Lieu avec Postes ne se supprime pas)
+  //   Depense.lieuId: Restrict (traçabilité comptable)
+  //   BudgetLieu:    Restrict (idem)
+  // En V1 il n'y a de toute façon pas de route DELETE /api/lieux/:id.
+  postes                  Poste[]
+  depenses                Depense[]
+  budgets                 BudgetLieu[]
 
-  @@map("chantiers")
+  @@map("lieux")
+  @@index([clientId])
+  @@index([chefId])
+  @@index([statut])
 }
 
 // ============================================================
-// DEVIS
+// POSTE — une intervention chiffrée sur un Lieu (= devis 1 ligne)
 // ============================================================
-// statut: 'brouillon' | 'envoye' | 'accepte' | 'refuse' | 'expire'
+// statut: 'A_FAIRE' | 'EN_COURS' | 'TERMINE'
+//
+// 1 Poste = 1 ligne unique. Pas de modèle LigneDevis séparé. Les
+// montants sont saisis directement par l'admin.
+//
+// Machine à états pour le chef (validation backend dans
+// routes/postes.js PATCH /:id) :
+//   - A_FAIRE  → EN_COURS  : autorisé
+//   - EN_COURS → TERMINE   : autorisé
+//   - TERMINE  → EN_COURS  : autorisé (correction d'erreur)
+//   - TERMINE  → A_FAIRE   : interdit (chef)
+//   - EN_COURS → A_FAIRE   : interdit (chef)
+// L'admin garde toutes les transitions libres (peut tout corriger).
+//
+// termineLe est renseigné automatiquement par le backend quand le
+// statut passe à TERMINE, et remis à null si on en sort. Sert au
+// tri du dashboard admin "créances à recouvrer".
+//
+// Champs montants (montantBrutCentimes, montantClientCentimes,
+// margeCentimes, margePourcent) : strippés de la réponse API quand
+// req.user.role === 'chef' (defense in depth).
 
-model Devis {
-  id                  Int             @id @default(autoincrement())
-  chantierId          Int             @map("chantier_id")
-  numero              String          @unique
-  version             Int             @default(1)
+model Poste {
+  id                    Int       @id @default(autoincrement())
+  lieuId                Int       @map("lieu_id")
 
-  statut              String          @default("brouillon")
-  dateEmission        DateTime        @default(now()) @map("date_emission")
-  validiteJours       Int             @default(30) @map("validite_jours")
+  titre                 String
+  description           String?
+  ordre                 Int       @default(0)
 
-  // Totaux calculés (en centimes DH)
-  totalBrutCentimes   Int             @default(0) @map("total_brut_centimes")
-  totalClientCentimes Int             @default(0) @map("total_client_centimes")
-  margeMontantCentimes Int            @default(0) @map("marge_montant_centimes")
+  // Statut + horodatage du passage en TERMINE
+  statut                String    @default("A_FAIRE")
+  termineLe             DateTime? @map("termine_le")
 
-  tempsTravailJours   Int?            @map("temps_travail_jours")
-  observations        String?
+  // Montants (réservés admin, strippés pour chef côté API)
+  montantBrutCentimes   Int       @default(0) @map("montant_brut_centimes")
+  montantClientCentimes Int       @default(0) @map("montant_client_centimes")
+  margeCentimes         Int       @default(0) @map("marge_centimes")
+  margePourcent         Float     @default(0) @map("marge_pourcent")
 
-  signeLe             DateTime?       @map("signe_le")
+  creeLe                DateTime  @default(now()) @map("cree_le")
+  modifieLe             DateTime  @updatedAt @map("modifie_le")
 
-  creeLe              DateTime        @default(now()) @map("cree_le")
-  modifieLe           DateTime        @updatedAt @map("modifie_le")
+  // Relations — onDelete:
+  //   Lieu→Poste:     Restrict (déclaré côté Lieu via la FK ci-dessous)
+  //   Paiement:       Restrict (protège la traçabilité financière)
+  //   Photo:          Cascade  (les photos d'un Poste supprimé partent avec)
+  //   Depense.posteId: SetNull (la dépense reste rattachée au Lieu)
+  //   BudgetLieu.posteId: SetNull (idem)
+  //
+  // En pratique la route DELETE /api/postes/:id pré-vérifie zéro
+  // Paiement ET zéro Dépense rattachés et retourne 409 sinon — le
+  // Restrict reste comme filet de sécurité ultime.
+  lieu                  Lieu        @relation(fields: [lieuId], references: [id], onDelete: Restrict)
+  paiements             Paiement[]
+  photos                Photo[]
+  depenses              Depense[]
+  budgets               BudgetLieu[]
 
-  chantier            Chantier        @relation(fields: [chantierId], references: [id], onDelete: Cascade)
-  lignes              LigneDevis[]
-
-  @@map("devis")
-}
-
-// section: 'main_oeuvre' | 'materiel' | 'divers'
-// typeMesure: 'quantite' | 'surface_m2' | 'forfait' | 'unite_temps'
-
-model LigneDevis {
-  id                       Int           @id @default(autoincrement())
-  devisId                  Int           @map("devis_id")
-  ordre                    Int
-  section                  String
-
-  description              String
-  observation              String?
-
-  typeMesure               String        @default("quantite") @map("type_mesure")
-  quantite                 Float         @default(1)
-
-  // Logique double colonne
-  prixUnitaireBrutCentimes   Int         @map("prix_unitaire_brut_centimes")
-  margePct                   Int         @default(15) @map("marge_pct")
-  coutBrutCentimes           Int         @map("cout_brut_centimes")
-  prixUnitaireClientCentimes Int         @map("prix_unitaire_client_centimes")
-  coutClientCentimes         Int         @map("cout_client_centimes")
-  margeMontantCentimes       Int         @map("marge_montant_centimes")
-
-  // Lien optionnel au catalogue
-  materiauId               Int?          @map("materiau_id")
-  materiau                 Materiau?     @relation(fields: [materiauId], references: [id])
-
-  creeLe                   DateTime      @default(now()) @map("cree_le")
-
-  devis                    Devis         @relation(fields: [devisId], references: [id], onDelete: Cascade)
-
-  @@map("lignes_devis")
-}
-
-// ============================================================
-// AVENANTS
-// ============================================================
-
-model Avenant {
-  id                 Int       @id @default(autoincrement())
-  chantierId         Int       @map("chantier_id")
-  numero             String
-  description        String
-  montantBrutCentimes   Int    @map("montant_brut_centimes")
-  montantClientCentimes Int    @map("montant_client_centimes")
-  margeMontantCentimes  Int    @map("marge_montant_centimes")
-  dateAccord         DateTime  @default(now()) @map("date_accord")
-  notes              String?
-
-  chantier           Chantier  @relation(fields: [chantierId], references: [id], onDelete: Cascade)
-
-  @@map("avenants")
+  @@map("postes")
+  @@index([lieuId])
+  @@index([statut])
+  @@index([termineLe])
 }
 
 // ============================================================
-// PAIEMENTS
+// PAIEMENT — versement client rattaché à un Poste
 // ============================================================
-// type: 'acompte' | 'mi_chantier' | 'solde' | 'avenant'
-// statut: 'attendu' | 'recu' | 'partiel' | 'en_retard'
-// moyen: 'virement' | 'cheque' | 'especes' | 'autre'
+// mode: 'CASH' | 'VIREMENT'
+//
+// Plusieurs paiements possibles par Poste, libres au fil de l'eau.
+// Pas d'échéancier, pas de "type" (acompte/mi_chantier/solde), pas
+// de "statut" (attendu/recu) — le paiement existe = il a été reçu.
 
 model Paiement {
-  id                Int             @id @default(autoincrement())
-  chantierId        Int             @map("chantier_id")
-  type              String
-  pourcentage       Int
-  montantCentimes   Int             @map("montant_centimes")
-  statut            String          @default("attendu")
-  dateAttendue      DateTime?       @map("date_attendue")
-  dateRecue         DateTime?       @map("date_recue")
-  moyen             String?
-  reference         String?
-  notes             String?
+  id              Int       @id @default(autoincrement())
+  posteId         Int       @map("poste_id")
+  date            DateTime
+  montantCentimes Int       @map("montant_centimes")
+  mode            String    // 'CASH' | 'VIREMENT'
+  description     String?
 
-  creeLe            DateTime        @default(now()) @map("cree_le")
-  modifieLe         DateTime        @updatedAt @map("modifie_le")
+  creeLe          DateTime  @default(now()) @map("cree_le")
 
-  chantier          Chantier        @relation(fields: [chantierId], references: [id], onDelete: Cascade)
+  // onDelete Restrict côté Poste : on ne supprime pas un Poste qui a
+  // des paiements (vérification applicative + filet Prisma).
+  poste           Poste     @relation(fields: [posteId], references: [id], onDelete: Restrict)
 
   @@map("paiements")
+  @@index([posteId])
 }
 
 // ============================================================
-// AVANCES (sous-traitants ET distributeurs)
+// PHOTO — module préparé mais sans API en V1
 // ============================================================
-// type: 'sous_traitant' | 'distributeur' | 'restaurant' | 'autre'
-// statut: 'en_attente_remboursement' | 'remboursee' | 'imputee_part_rachid'
+// Modèle créé pour anticiper le module Photos (avant/après par
+// intervention). Aucune route Fastify ne l'expose en V1 — sera ajouté
+// dans une session ultérieure. Stockage prévu sous
+// /uploads/postes/{posteId}/, servi en static par Caddy.
 
-model Avance {
-  id                Int           @id @default(autoincrement())
-  chantierId        Int?          @map("chantier_id")
-  type              String
-  beneficiaireId    Int?          @map("beneficiaire_id")
-  beneficiaireNom   String?       @map("beneficiaire_nom")
-  fournisseurId     Int?          @map("fournisseur_id")
+model Photo {
+  id              Int       @id @default(autoincrement())
+  posteId         Int       @map("poste_id")
+  cheminFichier   String    @map("chemin_fichier")
+  titre           String?
+  description     String?
+  prisLe          DateTime? @map("pris_le")
+  uploadeLe       DateTime  @default(now()) @map("uploade_le")
 
-  montantCentimes   Int           @map("montant_centimes")
-  dateAvance        DateTime      @default(now()) @map("date_avance")
-  description       String
-  justificatif      String?
+  poste           Poste     @relation(fields: [posteId], references: [id], onDelete: Cascade)
 
-  statut            String        @default("en_attente_remboursement")
-  dateRemboursement DateTime?     @map("date_remboursement")
-
-  creeLe            DateTime      @default(now()) @map("cree_le")
-
-  chantier          Chantier?     @relation(fields: [chantierId], references: [id])
-  beneficiaire      Utilisateur?  @relation("BeneficiaireAvance", fields: [beneficiaireId], references: [id])
-  fournisseur       Fournisseur?  @relation(fields: [fournisseurId], references: [id])
-
-  @@map("avances")
+  @@map("photos")
+  @@index([posteId])
 }
 
 // ============================================================
-// CATALOGUE MATÉRIAUX ET FOURNISSEURS
+// COMPTA — DÉPENSES (cash Rachid + factures fournisseurs)
 // ============================================================
-
-model Fournisseur {
-  id                Int           @id @default(autoincrement())
-  nom               String
-  contact           String?
-  telephone         String?
-  email             String?
-  adresse           String?
-  notes             String?
-  actif             Boolean       @default(true)
-
-  creeLe            DateTime      @default(now()) @map("cree_le")
-
-  materiaux         Materiau[]
-  avances           Avance[]
-  prixHistoriques   PrixHistorique[]
-
-  @@map("fournisseurs")
-}
-
-// categorie: 'ciment_sable_chaux' | 'carrelage_revetement' | 'peinture_enduit'
-//          | 'bois_charpente' | 'electricite' | 'plomberie' | 'sanitaire'
-//          | 'outillage' | 'divers'
-
-model Materiau {
-  id                Int               @id @default(autoincrement())
-  nom               String
-  categorie         String
-  uniteMesure       String            @default("unité") @map("unite_mesure")
-  fournisseurId     Int?              @map("fournisseur_id")
-
-  prixActuelCentimes Int              @map("prix_actuel_centimes")
-
-  notes             String?
-  actif             Boolean           @default(true)
-
-  creeLe            DateTime          @default(now()) @map("cree_le")
-  modifieLe         DateTime          @updatedAt @map("modifie_le")
-
-  fournisseur       Fournisseur?      @relation(fields: [fournisseurId], references: [id])
-  lignesDevis       LigneDevis[]
-  prixHistoriques   PrixHistorique[]
-
-  @@map("materiaux")
-}
-
-model PrixHistorique {
-  id                Int             @id @default(autoincrement())
-  materiauId        Int             @map("materiau_id")
-  fournisseurId     Int?            @map("fournisseur_id")
-  prixCentimes      Int             @map("prix_centimes")
-  dateReleve        DateTime        @default(now()) @map("date_releve")
-  notes             String?
-
-  materiau          Materiau        @relation(fields: [materiauId], references: [id], onDelete: Cascade)
-  fournisseur       Fournisseur?    @relation(fields: [fournisseurId], references: [id])
-
-  @@map("prix_historiques")
-}
-
-// ============================================================
-// PLANNING ET INTERVENTIONS
-// ============================================================
-// type: 'visite_site' | 'livraison_materiel' | 'intervention_chantier'
-//     | 'reception_travaux' | 'rdv_client'
-
-model Intervention {
-  id                Int               @id @default(autoincrement())
-  chantierId        Int               @map("chantier_id")
-  type              String
-  titre             String
-  description       String?
-  dateDebut         DateTime          @map("date_debut")
-  dateFin           DateTime          @map("date_fin")
-  participants      String?           // JSON array sérialisé
-  statut            String            @default("prevue")
-
-  creeLe            DateTime          @default(now()) @map("cree_le")
-
-  chantier          Chantier          @relation(fields: [chantierId], references: [id], onDelete: Cascade)
-
-  @@map("interventions")
-}
-
-// ============================================================
-// COMPTA — DÉPENSES DE CHANTIER
-// ============================================================
-// Catégorie : 'ACOMPTE' | 'MATERIEL' | 'REPAS' (validé côté zod)
-// Statut    : 'A_VALIDER' | 'VALIDEE'
+// categorie : 'ACOMPTE' | 'MATERIEL' | 'REPAS' (validé côté zod)
+// statut    : 'A_VALIDER' | 'VALIDEE'
 //
-// Cycle de vie :
-//   - Saisie par chef ou admin → A_VALIDER
+// Cycle de vie inchangé par rapport à la version pré-refonte :
+//   - Saisie chef          → A_VALIDER
+//   - Saisie admin         → VALIDEE auto
 //   - Chef peut modifier/supprimer sa propre dépense tant que A_VALIDER
-//   - Admin peut Valider (passage VALIDEE, lock) ou Modifier (modif + lock auto)
+//   - Admin peut valider ou modifier (modif → lock auto, audit corrigee*)
 //   - Une dépense VALIDEE est verrouillée pour le chef
 //
-// Champs d'audit `corrigee*` : tracent une modif admin (qui, quand).
-// On évite le nom `modifiee*` pour ne pas se confondre avec le @updatedAt.
+// Nouveautés refonte :
+//   - lieuId  obligatoire (ex-chantierId), onDelete Restrict
+//   - posteId optionnel : affectation fine à un Poste, onDelete SetNull
+//     (si on supprime le Poste, la dépense reste sur le Lieu)
+//   - fournisseur texte libre (pas de modèle Fournisseur persistant en V1)
 
 model Depense {
   id                       Int       @id @default(autoincrement())
-  chantierId               Int       @map("chantier_id")
+  lieuId                   Int       @map("lieu_id")
+  posteId                  Int?      @map("poste_id")
   saisieParId              Int       @map("saisie_par_id")
 
   date                     DateTime
   categorie                String    // 'ACOMPTE' | 'MATERIEL' | 'REPAS'
   montantCentimes          Int       @map("montant_centimes")
   description              String
+  fournisseur              String?   // texte libre, pas de FK
   estAvancePersonnelle     Boolean   @default(false) @map("est_avance_personnelle")
 
   statut                   String    @default("A_VALIDER")
@@ -440,58 +337,49 @@ model Depense {
   creeLe                   DateTime  @default(now()) @map("cree_le")
   modifieLe                DateTime  @updatedAt @map("modifie_le")
 
-  chantier                 Chantier     @relation(fields: [chantierId], references: [id], onDelete: Cascade)
+  lieu                     Lieu         @relation(fields: [lieuId], references: [id], onDelete: Restrict)
+  poste                    Poste?       @relation(fields: [posteId], references: [id], onDelete: SetNull)
   saisiePar                Utilisateur  @relation("DepenseSaisiePar", fields: [saisieParId], references: [id])
   valideePar               Utilisateur? @relation("DepenseValideePar", fields: [valideeParId], references: [id])
   corrigeePar              Utilisateur? @relation("DepenseCorrigeePar", fields: [corrigeeParId], references: [id])
 
   @@map("depenses")
-  @@index([chantierId])
+  @@index([lieuId])
+  @@index([posteId])
   @@index([statut])
 }
 
 // ============================================================
-// COMPTA — BUDGETS CHANTIER (cash Dominique → Rachid)
+// COMPTA — BUDGETS LIEU (cash Dominique → Rachid)
 // ============================================================
 // type :
 //   - 'VERSEMENT'     : Dominique donne du cash à Rachid pour démarrer
-//   - 'REMBOURSEMENT' : Dominique rembourse une avance personnelle de Rachid
+//   - 'REMBOURSEMENT' : Dominique rembourse une avance personnelle Rachid
+//
+// Renommé depuis BudgetChantier. Nouveautés refonte :
+//   - lieuId  obligatoire (ex-chantierId), onDelete Restrict
+//   - posteId optionnel : un versement peut être affecté à un Poste
+//     précis ou rester global au Lieu. onDelete SetNull.
 
-model BudgetChantier {
-  id              Int      @id @default(autoincrement())
-  chantierId      Int      @map("chantier_id")
-  userId          Int      @map("user_id")         // destinataire (Rachid en général)
+model BudgetLieu {
+  id              Int       @id @default(autoincrement())
+  lieuId          Int       @map("lieu_id")
+  posteId         Int?      @map("poste_id")
+  userId          Int       @map("user_id")         // destinataire (Rachid en général)
   date            DateTime
-  montantCentimes Int      @map("montant_centimes")
-  type            String   // 'VERSEMENT' | 'REMBOURSEMENT'
+  montantCentimes Int       @map("montant_centimes")
+  type            String    // 'VERSEMENT' | 'REMBOURSEMENT'
   description     String?
-  creeParId       Int      @map("cree_par_id")
-  creeLe          DateTime @default(now()) @map("cree_le")
+  creeParId       Int       @map("cree_par_id")
+  creeLe          DateTime  @default(now()) @map("cree_le")
 
-  chantier        Chantier    @relation(fields: [chantierId], references: [id], onDelete: Cascade)
+  lieu            Lieu        @relation(fields: [lieuId], references: [id], onDelete: Restrict)
+  poste           Poste?      @relation(fields: [posteId], references: [id], onDelete: SetNull)
   user            Utilisateur @relation("BudgetDestinataire", fields: [userId], references: [id])
   creePar         Utilisateur @relation("BudgetCreePar", fields: [creeParId], references: [id])
 
-  @@map("budgets_chantier")
-  @@index([chantierId])
+  @@map("budgets_lieu")
+  @@index([lieuId])
+  @@index([posteId])
   @@index([userId])
 }
-
-// ============================================================
-// PHOTOS CHANTIER
-// ============================================================
-
-model Photo {
-  id                Int           @id @default(autoincrement())
-  chantierId        Int           @map("chantier_id")
-  cheminFichier     String        @map("chemin_fichier")
-  titre             String?
-  description       String?
-  prisLe            DateTime?     @map("pris_le")
-  uploadeLe         DateTime      @default(now()) @map("uploade_le")
-
-  chantier          Chantier      @relation(fields: [chantierId], references: [id], onDelete: Cascade)
-
-  @@map("photos")
-}
-
