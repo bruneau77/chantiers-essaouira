@@ -174,14 +174,22 @@ nouveau code de devis doit pouvoir reproduire exactement ce devis.**
 
 Quand tu travailles sur ce projet :
 
-1. **Lire toujours ce fichier en premier** + le `CLAUDE.md` du sous-dossier
-   sur lequel tu travailles (backend ou frontend).
-2. **Respecter la logique métier** ci-dessus, surtout les calculs (devis,
+1. **Lire `docs/JOURNAL.md` en tout premier** — il contient le dernier
+   état d'avancement, les décisions récentes prises avec l'utilisateur,
+   les anomalies en cours et la prochaine étape suggérée. Sans ce fichier,
+   tu repars de zéro à chaque session.
+2. **À la fin de chaque session importante** (module terminé, décision
+   prise, anomalie identifiée), proposer d'ajouter une entrée au
+   `JOURNAL.md`. Le journal se met à jour au fil des sessions, pas
+   seulement quand l'utilisateur y pense.
+3. **Lire aussi le `CLAUDE.md`** du sous-dossier sur lequel tu travailles
+   (backend ou frontend).
+4. **Respecter la logique métier** ci-dessus, surtout les calculs (devis,
    frais km, parts).
-3. **Tester avec le cas Villa PY** quand tu touches au module devis.
-4. **Pas de surcouche inutile** : pas de Redux, pas de TypeScript V1, pas
+5. **Tester avec le cas Villa PY** quand tu touches au module devis.
+6. **Pas de surcouche inutile** : pas de Redux, pas de TypeScript V1, pas
    de tests E2E pour démarrer. On reste pragmatique.
-5. **Demander avant d'ajouter une dépendance npm** — chaque package compte
+7. **Demander avant d'ajouter une dépendance npm** — chaque package compte
    sur 4 GB RAM.
-6. **Communiquer en français** dans le code (commentaires, messages
+8. **Communiquer en français** dans le code (commentaires, messages
    d'erreur utilisateur, libellés UI).

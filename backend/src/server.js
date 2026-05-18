@@ -13,6 +13,19 @@ import staticPlugin from '@fastify/static'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+// Middleware
+import authentifiePlugin from './middleware/authentifie.js'
+import rolePlugin from './middleware/role.js'
+
+// Routes
+import authRoutes from './routes/auth.js'
+import chantiersRoutes from './routes/chantiers.js'
+import usersRoutes from './routes/users.js'
+import clientsRoutes from './routes/clients.js'
+import depensesRoutes from './routes/depenses.js'
+import budgetsRoutes from './routes/budgets.js'
+import comptaRoutes, { routesComptaChantier } from './routes/compta.js'
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
 const fastify = Fastify({
@@ -48,6 +61,10 @@ await fastify.register(staticPlugin, {
   prefix: '/uploads/',
 })
 
+// Middleware d'authentification (décore fastify.authentifie et fastify.role)
+await fastify.register(authentifiePlugin)
+await fastify.register(rolePlugin)
+
 // Health check
 fastify.get('/api/health', async () => ({
   status: 'ok',
@@ -55,9 +72,28 @@ fastify.get('/api/health', async () => ({
   service: 'chantiers-essaouira-api',
 }))
 
-// Routes (à implémenter progressivement avec Claude Code)
-// import authRoutes from './routes/auth.js'
-// import chantiersRoutes from './routes/chantiers.js'
+// Routes — Auth (priorité 1) ✓
+await fastify.register(authRoutes, { prefix: '/api/auth' })
+
+// Routes — Chantiers (priorité 2) ✓
+await fastify.register(chantiersRoutes, { prefix: '/api/chantiers' })
+// Extensions compta du préfixe /api/chantiers :
+//   GET /api/chantiers/:id/compta
+//   GET /api/chantiers/:id/budgets
+await fastify.register(routesComptaChantier, { prefix: '/api/chantiers' })
+
+// Routes — Users (dropdowns frontend, admin only) ✓
+await fastify.register(usersRoutes, { prefix: '/api/users' })
+
+// Routes — Clients (création inline depuis le formulaire chantier, admin only) ✓
+await fastify.register(clientsRoutes, { prefix: '/api/clients' })
+
+// Routes — Compta (priorité 3) ✓
+await fastify.register(depensesRoutes, { prefix: '/api/depenses' })
+await fastify.register(budgetsRoutes, { prefix: '/api/budgets' })
+await fastify.register(comptaRoutes, { prefix: '/api/compta' })
+
+// Routes (à implémenter progressivement)
 // import devisRoutes from './routes/devis.js'
 // import paiementsRoutes from './routes/paiements.js'
 // import avancesRoutes from './routes/avances.js'
@@ -65,7 +101,6 @@ fastify.get('/api/health', async () => ({
 // import planningRoutes from './routes/planning.js'
 // import reglagesRoutes from './routes/reglages.js'
 //
-// await fastify.register(authRoutes, { prefix: '/api/auth' })
 // await fastify.register(chantiersRoutes, { prefix: '/api/chantiers' })
 // await fastify.register(devisRoutes, { prefix: '/api/devis' })
 // await fastify.register(paiementsRoutes, { prefix: '/api/paiements' })

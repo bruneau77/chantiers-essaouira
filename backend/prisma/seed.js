@@ -39,10 +39,10 @@ async function main() {
   const motDePasseChef = await bcrypt.hash('chef123', 12)
 
   const yassine = await prisma.utilisateur.upsert({
-    where: { email: 'admin@ludimmo.ma' },
-    update: {},
+    where: { email: 'yassine.bruneau@gmail.com' },
+    update: { role: 'admin' },
     create: {
-      email: 'admin@ludimmo.ma',
+      email: 'yassine.bruneau@gmail.com',
       motDePasseHash: motDePasseAdmin,
       prenom: 'Yassine',
       nom: 'Bruneau',
@@ -52,28 +52,33 @@ async function main() {
   })
 
   const dominique = await prisma.utilisateur.upsert({
-    where: { email: 'dominique@ludimmo.ma' },
-    update: {},
+    where: { email: 'dbruneau77@gmail.com' },
+    update: { role: 'admin' },
     create: {
-      email: 'dominique@ludimmo.ma',
+      email: 'dbruneau77@gmail.com',
       motDePasseHash: motDePasseChef,
       prenom: 'Dominique',
       nom: 'Bruneau',
       telephone: '+212 6 87 19 86 36',
-      role: 'chef',
+      role: 'admin',
       partDefautPct: 50,
     },
   })
 
+  // Rachid : email placeholder en attendant le vrai. À remplacer
+  // quand Rachid aura communiqué son adresse mail.
+  // Nom 'El Mansouri' mis dans `update` ET `create` pour que le re-seed
+  // sans reset DB corrige aussi les enregistrements existants qui avaient
+  // le placeholder '(à compléter)'.
   const rachid = await prisma.utilisateur.upsert({
     where: { email: 'rachid@ludimmo.ma' },
-    update: {},
+    update: { role: 'chef', nom: 'El Mansouri' },
     create: {
       email: 'rachid@ludimmo.ma',
       motDePasseHash: motDePasseChef,
       prenom: 'Rachid',
-      nom: '(à compléter)',
-      role: 'sous_traitant',
+      nom: 'El Mansouri',
+      role: 'chef',
       partDefautPct: 50,
     },
   })
@@ -90,7 +95,7 @@ async function main() {
     },
   })
 
-  console.log('  ✓ 4 utilisateurs créés (admin/chef/sous_traitant/client)')
+  console.log('  ✓ 4 utilisateurs créés (2 admin / 1 chef / 1 client)')
 
   // -----------------------------------------------------------------
   // FOURNISSEUR + MATÉRIAUX DE BASE
@@ -132,17 +137,24 @@ async function main() {
   // -----------------------------------------------------------------
   // CHANTIER DE RÉFÉRENCE : Villa Pierre-Yves & Laurent
   // -----------------------------------------------------------------
+  // NOTE 2026-05-16 : `chefId` pointe désormais vers Rachid (chef de
+  // chantier terrain), conformément au cahier des charges Compta. Dominique
+  // reste admin/gérant commercial mais n'apparaît plus comme chef. On laisse
+  // `sousTraitantId` à null : Rachid n'est plus à la fois chef ET sous-traitant.
   const chantierVillaPY = await prisma.chantier.upsert({
     where: { numero: '2026-001' },
-    update: {},
+    update: {
+      chefId: rachid.id,
+      sousTraitantId: null,
+    },
     create: {
       numero: '2026-001',
       titre: 'Villa Pierre-Yves & Laurent',
       description: 'Réfection toiture 300 m² — terrasse principale',
       adresseChantier: 'Essaouira (à compléter)',
-      chefId: dominique.id,
+      chefId: rachid.id,
       clientId: clientDemo.id,
-      sousTraitantId: rachid.id,
+      sousTraitantId: null,
       statut: 'en_cours',
       distanceAllerKm: 8,
       nombreAllerRetourPrevu: 12,
@@ -166,6 +178,13 @@ async function main() {
   // -----------------------------------------------------------------
   // Lignes brutes correspondant au fichier VILLA_PY_ET_LAURENT.ods
   // Marge 15% par défaut sur tout (à ajuster ligne par ligne plus tard)
+  //
+  // TODO [vérif différée 2026-05-12] : ces 11 lignes produisent un total
+  // brut de 104 860 DH, alors que docs/devis_reference.md annonce ~129 915 DH.
+  // Écart de ~25 000 DH = des lignes manquantes (probablement). À
+  // rapprocher avec le fichier Excel d'origine quand il sera disponible.
+  // La LOGIQUE de calcul est validée — seules les données peuvent être
+  // incomplètes.
   const lignesBrutes = [
     // MAIN D'ŒUVRE
     { section: 'main_oeuvre', description: 'Retrait du carrelage ancien', typeMesure: 'surface_m2', quantite: 300, prixUnitaireBrutDh: 30, observation: 'Évacuation incluse' },
@@ -256,9 +275,9 @@ async function main() {
 
   console.log('\n✅ Seed terminé.')
   console.log('\nComptes de connexion :')
-  console.log('  admin@ludimmo.ma     / admin123  (Yassine)')
-  console.log('  dominique@ludimmo.ma / chef123   (Dominique)')
-  console.log('  rachid@ludimmo.ma    / chef123   (Rachid)')
+  console.log('  yassine.bruneau@gmail.com / admin123  (Yassine, admin)')
+  console.log('  dbruneau77@gmail.com      / chef123   (Dominique, admin)')
+  console.log('  rachid@ludimmo.ma         / chef123   (Rachid, chef — email placeholder)')
 }
 
 main()

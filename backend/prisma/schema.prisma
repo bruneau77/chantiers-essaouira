@@ -24,11 +24,23 @@ datasource db {
 
 model Utilisateur {
   id              Int       @id @default(autoincrement())
-  email           String    @unique
-  motDePasseHash  String    @map("mot_de_passe_hash")
+  // email et motDePasseHash sont optionnels :
+  //   - un client créé via le formulaire chantier peut ne pas avoir d'email
+  //     (saisie facultative)
+  //   - un compte sans motDePasseHash ne peut PAS se connecter (garde dans
+  //     routes/auth.js POST /login → 401 identifiants incorrects, message
+  //     générique pour ne pas révéler l'existence du compte)
+  // En SQLite, plusieurs valeurs NULL ne sont pas considérées comme égales
+  // pour UNIQUE, donc l'unicité de l'email reste assurée pour les non-null.
+  email           String?   @unique
+  motDePasseHash  String?   @map("mot_de_passe_hash")
   prenom          String
   nom             String
   telephone       String?
+  // Champs commerciaux (principalement pour les clients, mais disponibles
+  // sur tout utilisateur)
+  adresse         String?
+  notes           String?
   role            String    // 'admin' | 'chef' | 'sous_traitant' | 'client'
   partDefautPct   Int       @default(50) @map("part_defaut_pct")
   actif           Boolean   @default(true)
@@ -41,6 +53,13 @@ model Utilisateur {
   chantiersSousTrait  Chantier[]      @relation("SousTraitantChantier")
   avancesBeneficiaire Avance[]        @relation("BeneficiaireAvance")
   refreshTokens       RefreshToken[]
+
+  // Compta — dépenses & budgets chantier
+  depensesSaisies     Depense[]        @relation("DepenseSaisiePar")
+  depensesValidees    Depense[]        @relation("DepenseValideePar")
+  depensesCorrigees   Depense[]        @relation("DepenseCorrigeePar")
+  budgetsRecus        BudgetChantier[] @relation("BudgetDestinataire")
+  budgetsCrees        BudgetChantier[] @relation("BudgetCreePar")
 
   @@map("utilisateurs")
 }
@@ -146,6 +165,8 @@ model Chantier {
   avances            Avance[]
   photos             Photo[]
   interventions      Intervention[]
+  depenses           Depense[]
+  budgets            BudgetChantier[]
 
   @@map("chantiers")
 }
@@ -385,6 +406,78 @@ model Intervention {
 }
 
 // ============================================================
+// COMPTA — DÉPENSES DE CHANTIER
+// ============================================================
+// Catégorie : 'ACOMPTE' | 'MATERIEL' | 'REPAS' (validé côté zod)
+// Statut    : 'A_VALIDER' | 'VALIDEE'
+//
+// Cycle de vie :
+//   - Saisie par chef ou admin → A_VALIDER
+//   - Chef peut modifier/supprimer sa propre dépense tant que A_VALIDER
+//   - Admin peut Valider (passage VALIDEE, lock) ou Modifier (modif + lock auto)
+//   - Une dépense VALIDEE est verrouillée pour le chef
+//
+// Champs d'audit `corrigee*` : tracent une modif admin (qui, quand).
+// On évite le nom `modifiee*` pour ne pas se confondre avec le @updatedAt.
+
+model Depense {
+  id                       Int       @id @default(autoincrement())
+  chantierId               Int       @map("chantier_id")
+  saisieParId              Int       @map("saisie_par_id")
+
+  date                     DateTime
+  categorie                String    // 'ACOMPTE' | 'MATERIEL' | 'REPAS'
+  montantCentimes          Int       @map("montant_centimes")
+  description              String
+  estAvancePersonnelle     Boolean   @default(false) @map("est_avance_personnelle")
+
+  statut                   String    @default("A_VALIDER")
+  valideeParId             Int?      @map("validee_par_id")
+  valideeLe                DateTime? @map("validee_le")
+  corrigeeParId            Int?      @map("corrigee_par_id")
+  corrigeeLe               DateTime? @map("corrigee_le")
+
+  creeLe                   DateTime  @default(now()) @map("cree_le")
+  modifieLe                DateTime  @updatedAt @map("modifie_le")
+
+  chantier                 Chantier     @relation(fields: [chantierId], references: [id], onDelete: Cascade)
+  saisiePar                Utilisateur  @relation("DepenseSaisiePar", fields: [saisieParId], references: [id])
+  valideePar               Utilisateur? @relation("DepenseValideePar", fields: [valideeParId], references: [id])
+  corrigeePar              Utilisateur? @relation("DepenseCorrigeePar", fields: [corrigeeParId], references: [id])
+
+  @@map("depenses")
+  @@index([chantierId])
+  @@index([statut])
+}
+
+// ============================================================
+// COMPTA — BUDGETS CHANTIER (cash Dominique → Rachid)
+// ============================================================
+// type :
+//   - 'VERSEMENT'     : Dominique donne du cash à Rachid pour démarrer
+//   - 'REMBOURSEMENT' : Dominique rembourse une avance personnelle de Rachid
+
+model BudgetChantier {
+  id              Int      @id @default(autoincrement())
+  chantierId      Int      @map("chantier_id")
+  userId          Int      @map("user_id")         // destinataire (Rachid en général)
+  date            DateTime
+  montantCentimes Int      @map("montant_centimes")
+  type            String   // 'VERSEMENT' | 'REMBOURSEMENT'
+  description     String?
+  creeParId       Int      @map("cree_par_id")
+  creeLe          DateTime @default(now()) @map("cree_le")
+
+  chantier        Chantier    @relation(fields: [chantierId], references: [id], onDelete: Cascade)
+  user            Utilisateur @relation("BudgetDestinataire", fields: [userId], references: [id])
+  creePar         Utilisateur @relation("BudgetCreePar", fields: [creeParId], references: [id])
+
+  @@map("budgets_chantier")
+  @@index([chantierId])
+  @@index([userId])
+}
+
+// ============================================================
 // PHOTOS CHANTIER
 // ============================================================
 
@@ -401,3 +494,4 @@ model Photo {
 
   @@map("photos")
 }
+
