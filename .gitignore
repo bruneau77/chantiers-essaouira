@@ -37,9 +37,10 @@ Thumbs.db
 postgres_data/
 
 # Prisma — fichiers générés
-backend/prisma/migrations/
-!backend/prisma/migrations/.gitkeep
-
+backend/prisma/dev.db
+backend/prisma/dev.db-journal
+backend/prisma/dev.db-shm
+backend/prisma/dev.db-wal
 # PDF générés temporairement
 *.pdf
 !docs/*.pdf
