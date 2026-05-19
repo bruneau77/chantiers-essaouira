@@ -11,6 +11,170 @@ chronologique inverse (la plus récente en haut).
 
 ---
 
+## Session du 2026-05-19 — PHASE 2 refonte Lieu/Poste/Paiement exécutée
+
+> **Refonte livrée.** La PHASE 2 — l'exécution du plan validé en
+> PHASE 1 — est terminée. La modélisation à trois niveaux
+> **CLIENT → LIEU → POSTE** est en place de bout en bout (schéma,
+> backend, seed, frontend) et a passé les tests visuels en local.
+> 5 commits Git successifs, chacun verrouillé sur GitHub avant
+> l'enchaînement suivant.
+
+### Statut
+
+L'app tourne sur le nouveau modèle. La DB locale contient la Villa
+Pierre-Yves Laurent (`L-2026-001`) avec 3 Postes couvrant les 3 statuts,
+2 paiements, 3 dépenses, 2 budgets — tout est cohérent et le statut du
+Lieu est bien recalculé à `EN_COURS` par la fonction applicative
+`recalculerStatutLieu`. Aucune trace de l'ancien modèle (Chantier,
+Devis, LigneDevis, Avenant, Avance, Fournisseur, Materiau,
+PrixHistorique, Intervention, BudgetChantier) ne subsiste, ni au schéma
+ni dans le code.
+
+### Découpage en commits (verrouillés sur GitHub dans l'ordre)
+
+| # | Commit | Contenu |
+|---|---|---|
+| 1 | `e1f436a` — `refonte(schema)` | Nouveau `schema.prisma` (9 modèles), une seule migration `init_lieu_poste_paiement`, reset complet de `dev.db`. Anciennes migrations purgées. |
+| 2 | `2d07216` — `refonte(backend)` | 11 fichiers : helper `lib/postesHelpers.js` (3 utilitaires partagés), routes neuves `routes/{lieux,postes,paiements,admin}.js`, réécriture `routes/{depenses,budgets,compta}.js` et `server.js`. Suppression `routes/chantiers.js` et `lib/calculsDevis.js`. |
+| 3 | (seed inclus dans le rebuild après commit 2) | Réécriture complète `prisma/seed.js` avec les corrections de données (Rachid AQOUDI / `rachid_aqoudi@hotmail.fr`). |
+| 4 | `61676b3` — `refonte(frontend)` | 11 fichiers Svelte : `NouveauPosteModale.svelte` neuve, refonte d'`AjoutDepenseForm`, `DepenseRow`, `NavBas`, 6 pages réécrites/créées sous `lieux/` (liste, nouveau, fiche, compta, fiche poste) + adaptation du dashboard `/compta`. Ancien dossier `chantiers/` supprimé. |
+| 5 | (cette entrée) | Mise à jour `JOURNAL.md` + `CLAUDE.md`, vérification absence de debug oublié. |
+
+### Décisions techniques majeures (8 questions Q1-Q8 validées et implémentées)
+
+- **Q1 — Statut Lieu calculé.** Colonne stockée `statut`, recalculée
+  applicativement après chaque mutation de Poste dans la même
+  transaction Prisma (`prisma.$transaction` + `recalculerStatutLieu`).
+  Pas de hook middleware. Endpoint admin caché
+  `POST /api/admin/recalculer-statuts` pour recalcul en bloc (non
+  exposé dans l'UI).
+- **Q2 — Politique `onDelete`.** Lieu→Poste/Depense/BudgetLieu :
+  `Restrict`. Poste→Paiement : `Restrict` (protection traçabilité
+  financière, divergence vs proposition initiale). Poste→Photo :
+  `Cascade`. Poste→Depense/BudgetLieu : `SetNull`. Pas de
+  `DELETE /api/lieux/:id` ni `DELETE /api/clients/:id` en V1.
+  `DELETE /api/postes/:id` ne passe que si 0 paiement ET 0 dépense,
+  sinon `409 POSTE_NON_SUPPRIMABLE`.
+- **Q3 — Champs orphelins Reglages purgés.** Suppression de
+  `pctAcompte`, `pctMiChantier`, `pctSolde`, `joursAvantRelanceAcompte`,
+  `margeDefautPct`, `baseCommission` (logique 30/40/30 et partage
+  Yassine/Rachid hors V1). Reste véhicule + entreprise.
+- **Q4 — Dashboard admin « créances à recouvrer ».** Remplace l'ancienne
+  section « paiements clients en attente ». Liste les Postes TERMINE
+  dont la somme des paiements est strictement inférieure à
+  `montantClientCentimes`, triés par `termineLe asc` (créance la plus
+  ancienne d'abord). Champ `Poste.termineLe DateTime?` ajouté au schéma,
+  mis à jour automatiquement par le backend quand le statut passe à
+  `TERMINE` (et remis à `null` si on revient en arrière).
+- **Q5 — Création Poste = modale.** `NouveauPosteModale.svelte`, pattern
+  identique à `NouveauClientModale`. Bouton « + Nouveau poste » uniquement
+  affiché pour le rôle admin sur la fiche Lieu.
+- **Q6 — Strip montants côté API pour rôle chef.** Helper
+  `selectPosteSelonRole(user)` dans `lib/postesHelpers.js`. Les 4 champs
+  `montantBrutCentimes`, `montantClientCentimes`, `margeCentimes`,
+  `margePourcent` sont strippés de toutes les réponses API quand
+  `req.user.role === 'chef'`. Defense in depth, doublé d'une condition
+  d'affichage `{#if estAdmin}` côté frontend.
+- **Q7 — Module Photos.** Modèle `Photo` créé dans le schéma (FK
+  `posteId`, `onDelete: Cascade`), aucune route Fastify ni UI en V1.
+  Ouverture pour une session future.
+- **Q8 — Machine à états du chef.** Transitions autorisées pour le chef :
+  `A_FAIRE → EN_COURS`, `EN_COURS → TERMINE`, `TERMINE → EN_COURS`
+  (correction d'erreur). Interdites : `EN_COURS → A_FAIRE`,
+  `TERMINE → A_FAIRE`. L'admin a toutes les transitions libres.
+  Validation backend dans `PATCH /api/postes/:id` → `422
+  TRANSITION_INTERDITE` si KO. Côté UI, les boutons des transitions
+  interdites apparaissent **désactivés** (grisés + tooltip), pas masqués.
+
+### Permissions chef strictes (au-delà de Q6)
+
+- Schémas zod différenciés sur `PATCH /api/postes/:id` :
+  - admin : `schemaModifAdmin` (titre, description, statut, montants,
+    ordre)
+  - chef : `schemaModifChef.strict()` qui accepte **uniquement** `statut`
+    et renvoie `400 VALIDATION` sur tout autre champ (pas de strip
+    silencieux : un bug frontend qui enverrait un titre se voit
+    immédiatement).
+- `POST /api/postes` et `DELETE /api/postes/:id` : admin uniquement.
+- Liste des Postes pour le chef filtrée WHERE `lieu.chefId = user.id`,
+  quel que soit le `?lieuId=` passé en query (le chef ne peut pas
+  scanner les lieux d'un autre chef).
+- `AjoutDepenseForm` côté chef : dropdown Postes du Lieu sans montants
+  (déjà strippés par l'API).
+
+### Corrections de données (importantes pour mémoire)
+
+- **Rachid AQOUDI** (et non « El Mansouri » qui était une erreur dev
+  persistante depuis le premier seed). Email réel
+  `rachid_aqoudi@hotmail.fr` (et non le placeholder
+  `rachid@ludimmo.ma`).
+- **Pierre-Yves Laurent** reste sans email ni mot de passe — c'est le
+  cas client typique créé via la modale du formulaire Lieu, illustré
+  dans le seed pour vérifier la branche « client sans connexion ».
+- **L'ancien `console.log [DEBUG prenom client]`** dans
+  `routes/chantiers.js` est parti avec la suppression du fichier au
+  commit 2. Le bug typo « Pierre -Jean » est donc résolu de fait (les
+  routes Lieu/Poste n'ont jamais embarqué ce log). Si une typo
+  réapparaît un jour côté création client (`POST /api/clients`),
+  prévoir une normalisation `/\s*-\s*/g → -` sur `prenom`/`nom` à la
+  saisie — non urgent.
+
+### Tests validés en live (côté Yassine, mobile + desktop)
+
+1. Login admin (`yassine.bruneau@gmail.com` / `admin123`) → home admin
+   affiche les Postes EN_COURS (Poste B « 3 tables marbre + bibliothèque »).
+2. Login chef (`rachid_aqoudi@hotmail.fr` / `chef123`) → home chef
+   affiche ses Lieux (Villa Pierre-Yves uniquement).
+3. Navigation `/lieux` → Villa Pierre-Yves visible avec compteur
+   « 3 postes » et statut EN_COURS.
+4. Fiche Lieu → 3 Postes listés avec leur statut, lien vers chaque
+   fiche Poste. Bouton « + Nouveau poste » visible admin, absent chef.
+5. Fiche Poste B (EN_COURS) → boutons de transition statut, section
+   Montants (admin uniquement), paiement CASH 200 DH, dépense
+   « Bois pour bibliothèque » de Hassan menuisier, versement budget
+   5 000 DH affecté.
+6. **Machine à états Q8** confirmée : bouton « À faire » grisé après
+   passage en TERMINE côté chef. Tooltip « Transition réservée à
+   l'administrateur » affiché.
+7. **Strip côté API** confirmé en chef : section Montants absente sur
+   fiche Poste, pas de colonne montant sur les cards Lieu.
+8. Dashboard `/compta` admin : section « Créances à recouvrer » présente
+   et fonctionnelle. (Vide aujourd'hui car le seul Poste TERMINE est
+   intégralement payé — comportement attendu.)
+9. Création d'un nouveau Poste via modale → ajout en base, statut Lieu
+   inchangé si initial `A_FAIRE`, le Lieu repasse en `EN_COURS` si
+   `EN_COURS`.
+
+### Prochaines étapes (post-PHASE 2)
+
+1. **Module Photos** : créer les routes `/api/postes/:id/photos`
+   (multipart upload via Sharp, stockage `/uploads/postes/{posteId}/`)
+   et l'UI sur la fiche Poste (galerie avant/après).
+2. **PDF devis client** : générer un PDF à partir d'un ou plusieurs
+   Postes d'un Lieu pour envoi WhatsApp / email.
+3. **Compta générale analytique** : la page `/compta/general` est
+   toujours un placeholder. À implémenter quand Dominique aura
+   exprimé son besoin précis.
+4. **Migration PostgreSQL** : prévue pour la mise en prod sur le VPS
+   (cf. `docs/migration-postgres.md` à créer).
+5. **Espace client** par URL secrète (V1.5/V2) : permettre au client
+   de voir l'état de ses Postes sans compte.
+
+### Notes pour la prochaine session
+
+- Le bug typo « Pierre -Jean » n'est plus pertinent. Si on rencontre
+  un espace parasite dans un prénom composé, c'est nouveau et à
+  diagnostiquer (probablement saisie).
+- Le helper `nomComplet(u)` (`lib/utils/nom.js`) avec tirets insécables
+  U+2011 reste en place dans tout le frontend, c'est de toute façon
+  utile contre les sauts de ligne sur mobile.
+- L'endpoint admin `POST /api/admin/recalculer-statuts` est documenté
+  dans `routes/admin.js` mais non exposé dans l'UI. À garder en tête
+  pour cas de désynchro.
+
+---
+
 ## Session du 2026-05-17 — Cadrage refonte Lieu/Poste/Paiement
 
 > **Décision structurante.** Cette session est une session de réflexion
