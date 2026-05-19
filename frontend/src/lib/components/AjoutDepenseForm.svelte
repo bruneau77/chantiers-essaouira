@@ -1,8 +1,17 @@
 <script>
+	import { onMount } from 'svelte';
 	import { apiAuth } from '$lib/stores/auth.js';
 
+	// Refonte 2026-05-18 :
+	//   - prop renommée : chantierId → lieuId
+	//   - nouveau prop optionnel posteIdInitial : pré-sélectionne le Poste
+	//     quand le formulaire est ouvert depuis une fiche Poste
+	//   - chargement de la liste des Postes du Lieu (sans montants pour
+	//     le chef — déjà strippés côté API)
+	//   - nouveau champ fournisseur (texte libre)
 	let {
-		chantierId,
+		lieuId,
+		posteIdInitial = null,
 		depenseExistante = null, // si fourni → mode édition
 		onTermine = () => {},     // callback(success: bool)
 		onAnnule = () => {}
@@ -16,31 +25,36 @@
 
 	const enEdition = !!depenseExistante;
 
-	// État du formulaire
-	// IMPORTANT Svelte 5 : ne PAS référencer un prop directement dans un
-	// initialiseur $state(...) — ça déclenche le warning state_referenced_locally
-	// et casse la réactivité du binding (bind:checked notamment).
-	// On initialise avec des primitives, puis on charge les valeurs depuis
-	// la prop dans un bloc d'init exécuté une seule fois au montage.
+	// État du formulaire — primitives uniquement (règle Svelte 5 :
+	// ne pas référencer un prop dans un initialiseur $state)
 	let categorie = $state('ACOMPTE');
 	let date = $state(new Date().toISOString().slice(0, 10));
 	let montantDh = $state('');
 	let description = $state('Acompte ouvrier');
+	let fournisseur = $state('');
+	let posteId = $state('');
 	let estAvancePersonnelle = $state(false);
 
+	// Chargement async de la liste des Postes pour le dropdown
+	let postes = $state([]);
+	let chargementPostes = $state(true);
+
+	// Pré-remplissage en mode édition
 	if (depenseExistante) {
 		categorie = depenseExistante.categorie;
 		date = new Date(depenseExistante.date).toISOString().slice(0, 10);
 		montantDh = Math.round(depenseExistante.montantCentimes / 100).toString();
 		description = depenseExistante.description;
+		fournisseur = depenseExistante.fournisseur ?? '';
+		posteId = depenseExistante.posteId ? String(depenseExistante.posteId) : '';
 		estAvancePersonnelle = depenseExistante.estAvancePersonnelle ?? false;
+	} else if (posteIdInitial) {
+		posteId = String(posteIdInitial);
 	}
 
 	let envoiEnCours = $state(false);
 	let erreur = $state('');
 
-	// Quand on clique sur un bouton catégorie : pré-remplir description si vide ou égale à
-	// la description par défaut d'une autre catégorie (pour ne pas écraser une saisie volontaire)
 	const descriptionsDefaut = CATEGORIES.map((c) => c.descriptionDefaut);
 
 	function choisirCategorie(cat) {
@@ -51,12 +65,26 @@
 		categorie = cat;
 	}
 
+	async function chargerPostes() {
+		if (!lieuId) return;
+		try {
+			const res = await apiAuth(`/api/postes?lieuId=${lieuId}`);
+			if (res.ok) {
+				const payload = await res.json();
+				postes = payload.data ?? [];
+			}
+		} catch {
+			// silencieux : le dropdown reste vide, dépense sans poste reste possible
+		} finally {
+			chargementPostes = false;
+		}
+	}
+
+	onMount(chargerPostes);
+
 	async function enregistrer() {
 		erreur = '';
 
-		// Validation côté client
-		// `<input type="number">` renvoie déjà un Number ou '' via bind:value.
-		// On normalise via Number() pour gérer string ET number sans planter.
 		const montant = Number(montantDh);
 		if (!Number.isFinite(montant) || montant <= 0) {
 			erreur = 'Le montant doit être un nombre positif.';
@@ -72,6 +100,8 @@
 			categorie,
 			montantCentimes: Math.round(montant * 100),
 			description: description.trim(),
+			fournisseur: fournisseur.trim() || null,
+			posteId: posteId ? parseInt(posteId, 10) : null,
 			estAvancePersonnelle
 		};
 
@@ -86,7 +116,7 @@
 			} else {
 				res = await apiAuth('/api/depenses', {
 					method: 'POST',
-					body: JSON.stringify({ ...corps, chantierId })
+					body: JSON.stringify({ ...corps, lieuId })
 				});
 			}
 
@@ -108,7 +138,6 @@
 <form class="formulaire" onsubmit={(e) => { e.preventDefault(); enregistrer(); }}>
 	<h3 class="titre">{enEdition ? 'Modifier la dépense' : 'Nouvelle dépense'}</h3>
 
-	<!-- Boutons rapides catégorie -->
 	<div class="boutons-categorie">
 		{#each CATEGORIES as cat (cat.valeur)}
 			<button
@@ -122,44 +151,52 @@
 		{/each}
 	</div>
 
-	<!-- Date -->
 	<label class="champ">
 		<span class="label">Date</span>
 		<input type="date" bind:value={date} required />
 	</label>
 
-	<!-- Montant -->
 	<label class="champ">
-		<span class="label">Montant</span>
-		<div class="champ-monnaie">
-			<input
-				type="number"
-				inputmode="decimal"
-				step="1"
-				min="0"
-				bind:value={montantDh}
-				placeholder="0"
-				required
-			/>
-			<span class="suffixe">DH</span>
-		</div>
-	</label>
-
-	<!-- Description -->
-	<label class="champ">
-		<span class="label">Description</span>
+		<span class="label">Montant (DH)</span>
 		<input
-			type="text"
-			bind:value={description}
-			maxlength="500"
+			type="number"
+			inputmode="decimal"
+			min="0.01"
+			step="0.01"
+			bind:value={montantDh}
+			placeholder="0"
 			required
 		/>
 	</label>
 
-	<!-- Avance perso -->
-	<label class="case-cocher">
+	<label class="champ">
+		<span class="label">Description</span>
+		<input type="text" bind:value={description} maxlength="500" required />
+	</label>
+
+	<label class="champ">
+		<span class="label">Fournisseur (optionnel)</span>
+		<input
+			type="text"
+			bind:value={fournisseur}
+			placeholder="Ex: Hassan menuisier, distributeur ciment…"
+			maxlength="200"
+		/>
+	</label>
+
+	<label class="champ">
+		<span class="label">Affecter à un poste (optionnel)</span>
+		<select bind:value={posteId} disabled={chargementPostes}>
+			<option value="">— Aucun (dépense globale au lieu) —</option>
+			{#each postes as p (p.id)}
+				<option value={String(p.id)}>{p.titre} ({p.statut})</option>
+			{/each}
+		</select>
+	</label>
+
+	<label class="case-cochee">
 		<input type="checkbox" bind:checked={estAvancePersonnelle} />
-		<span>Avance personnelle (à me rembourser)</span>
+		<span>Avance personnelle (à rembourser par Dominique)</span>
 	</label>
 
 	{#if erreur}
@@ -167,13 +204,11 @@
 	{/if}
 
 	<div class="actions">
-		{#if enEdition}
-			<button type="button" class="bouton-secondaire" onclick={onAnnule} disabled={envoiEnCours}>
-				Annuler
-			</button>
-		{/if}
-		<button type="submit" class="bouton-principal" disabled={envoiEnCours}>
-			{envoiEnCours ? 'Enregistrement…' : enEdition ? 'Enregistrer' : 'Ajouter la dépense'}
+		<button type="button" class="bouton-secondaire" onclick={onAnnule} disabled={envoiEnCours}>
+			Annuler
+		</button>
+		<button type="submit" class="bouton-primaire" disabled={envoiEnCours}>
+			{envoiEnCours ? 'Envoi…' : enEdition ? 'Enregistrer' : 'Ajouter'}
 		</button>
 	</div>
 </form>
@@ -183,103 +218,85 @@
 		display: flex;
 		flex-direction: column;
 		gap: var(--esp-md);
-		background: var(--couleur-fond-carte);
-		border: 1px solid var(--couleur-bordure);
-		border-radius: var(--rayon-lg);
-		padding: var(--esp-md);
 	}
 
 	.titre {
-		font-size: 16px;
+		font-size: 18px;
 		font-weight: 700;
 		margin-bottom: var(--esp-xs);
 	}
 
 	.boutons-categorie {
-		display: grid;
-		grid-template-columns: repeat(3, 1fr);
+		display: flex;
 		gap: var(--esp-sm);
 	}
+
 	.bouton-cat {
-		padding: var(--esp-md) var(--esp-sm);
-		border-radius: var(--rayon-md);
-		font-size: 13px;
-		font-weight: 700;
-		text-transform: uppercase;
-		letter-spacing: 0.04em;
-		color: var(--couleur-texte-secondaire);
+		flex: 1;
+		padding: var(--esp-sm) var(--esp-md);
+		border: 1.5px solid var(--couleur-bordure-forte);
 		background: var(--couleur-fond);
-		border: 1.5px solid var(--couleur-bordure);
-		min-height: 48px;
+		border-radius: var(--rayon-md);
+		font-size: 14px;
+		font-weight: 500;
+		color: var(--couleur-texte-secondaire);
 	}
-	.bouton-cat.actif.cat-ACOMPTE { background: #1e4d6b; color: white; border-color: #1e4d6b; }
-	.bouton-cat.actif.cat-MATERIEL { background: #c8924a; color: white; border-color: #c8924a; }
-	.bouton-cat.actif.cat-REPAS { background: #7a5a2b; color: white; border-color: #7a5a2b; }
+
+	.bouton-cat.actif {
+		border-color: var(--couleur-primaire);
+		background: var(--couleur-primaire);
+		color: white;
+	}
 
 	.champ {
 		display: flex;
 		flex-direction: column;
-		gap: 4px;
-	}
-	.label {
-		font-size: 12px;
-		font-weight: 600;
-		color: var(--couleur-texte-secondaire);
-		text-transform: uppercase;
-		letter-spacing: 0.04em;
+		gap: var(--esp-xs);
 	}
 
-	input[type="date"],
-	input[type="text"],
-	input[type="number"] {
-		font-size: 16px; /* éviter le zoom iOS */
-		padding: 12px;
-		border: 1.5px solid var(--couleur-bordure-forte);
-		border-radius: var(--rayon-sm);
-		background: var(--couleur-fond);
-		color: var(--couleur-texte);
-		width: 100%;
+	.label {
+		font-size: 13px;
+		font-weight: 600;
+		color: var(--couleur-texte-secondaire);
 	}
-	input:focus {
+
+	.champ input,
+	.champ select {
+		padding: var(--esp-md);
+		border: 1px solid var(--couleur-bordure-forte);
+		border-radius: var(--rayon-md);
+		font-size: 16px;
+		background: var(--couleur-fond);
+		min-height: var(--taille-tactile);
+		font-family: inherit;
+	}
+
+	.champ input:focus,
+	.champ select:focus {
 		outline: none;
 		border-color: var(--couleur-primaire);
 	}
 
-	.champ-monnaie {
-		position: relative;
-		display: flex;
-		align-items: center;
-	}
-	.champ-monnaie input { padding-right: 48px; }
-	.suffixe {
-		position: absolute;
-		right: 12px;
-		font-size: 14px;
-		font-weight: 600;
-		color: var(--couleur-texte-secondaire);
-		pointer-events: none;
-	}
-
-	.case-cocher {
+	.case-cochee {
 		display: flex;
 		align-items: center;
 		gap: var(--esp-sm);
 		font-size: 14px;
-		color: var(--couleur-texte);
-		min-height: 44px;
+		color: var(--couleur-texte-secondaire);
+		padding: var(--esp-sm) 0;
 	}
-	.case-cocher input[type="checkbox"] {
+
+	.case-cochee input {
 		width: 20px;
 		height: 20px;
-		accent-color: var(--couleur-primaire);
 	}
 
 	.erreur {
+		color: var(--couleur-erreur);
+		font-size: 14px;
 		padding: var(--esp-sm);
-		background: #fdf3f1;
-		color: #b03a2e;
-		border-radius: var(--rayon-sm);
-		font-size: 13px;
+		background: rgba(176, 58, 46, 0.08);
+		border-radius: var(--rayon-md);
 	}
 
 	.actions {
@@ -288,28 +305,28 @@
 		margin-top: var(--esp-sm);
 	}
 
-	.bouton-principal {
-		flex: 1;
-		padding: var(--esp-md);
-		background: var(--couleur-primaire);
-		color: white;
-		font-weight: 700;
-		font-size: 15px;
-		border-radius: var(--rayon-md);
-		min-height: var(--taille-tactile);
-	}
-	.bouton-principal:disabled { opacity: 0.5; }
-	.bouton-principal:active:not(:disabled) { opacity: 0.85; }
-
+	.bouton-primaire,
 	.bouton-secondaire {
 		flex: 1;
 		padding: var(--esp-md);
+		border-radius: var(--rayon-md);
+		font-size: 15px;
+		font-weight: 600;
+		min-height: var(--taille-tactile);
+	}
+
+	.bouton-primaire {
+		background: var(--couleur-primaire);
+		color: white;
+	}
+
+	.bouton-primaire:disabled {
+		opacity: 0.6;
+	}
+
+	.bouton-secondaire {
 		background: transparent;
 		color: var(--couleur-texte-secondaire);
-		font-weight: 600;
-		font-size: 15px;
-		border-radius: var(--rayon-md);
 		border: 1.5px solid var(--couleur-bordure-forte);
-		min-height: var(--taille-tactile);
 	}
 </style>

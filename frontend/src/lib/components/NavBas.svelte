@@ -4,8 +4,12 @@
 	import { auth, apiAuth } from '$lib/stores/auth.js';
 	import { badgeAValider } from '$lib/stores/badgeAValider.js';
 
+	// Refonte 2026-05-18 : libellé « Chantiers » → « Lieux ». La route reste
+	// « / » (homepage role-adaptive : admin voit les Postes EN_COURS, chef
+	// voit ses Lieux). La page /lieux (avec filtres) est accessible depuis
+	// la home admin via le bouton « Tous les lieux ».
 	const tousLesOnglets = [
-		{ lien: '/', label: 'Chantiers', roles: ['admin', 'chef'], icone: 'chantiers' },
+		{ lien: '/', label: 'Lieux', roles: ['admin', 'chef'], icone: 'lieux' },
 		{ lien: '/photos', label: 'Photos', roles: ['admin', 'chef'], icone: 'photos' },
 		{ lien: '/compta', label: 'Compta', roles: ['admin', 'chef'], icone: 'compta' },
 		{ lien: '/profil', label: 'Profil', roles: ['admin', 'chef'], icone: 'profil' }
@@ -16,13 +20,6 @@
 			? tousLesOnglets.filter((o) => o.roles.includes($auth.utilisateur.role))
 			: []
 	);
-
-	// Badge "à valider" : alimenté par le store partagé badgeAValider.
-	//  - Polling 60 s pour la source de vérité serveur (filet de sécurité)
-	//  - Décrémenté localement dès qu'une action UI (valider/supprimer)
-	//    fait sortir une dépense de l'état A_VALIDER → réactivité immédiate
-	//  - Rafraîchi aussi à chaque navigation (au cas où une dépense vient
-	//    d'être créée par un autre utilisateur)
 
 	async function rafraichirBadge() {
 		if ($auth.utilisateur?.role !== 'admin') {
@@ -45,17 +42,15 @@
 		return () => clearInterval(interval);
 	});
 
-	// Rafraîchir le badge à chaque changement de page (capture les dépenses
-	// créées dans un autre onglet ou par un autre utilisateur).
 	let chemin = $derived($page.url.pathname);
 	$effect(() => {
-		chemin; // dépendance réactive
+		chemin;
 		rafraichirBadge();
 	});
 
 	function estActif(lien) {
 		const chemin = $page.url.pathname;
-		if (lien === '/') return chemin === '/';
+		if (lien === '/') return chemin === '/' || chemin.startsWith('/lieux');
 		return chemin.startsWith(lien);
 	}
 </script>
@@ -72,7 +67,7 @@
 				{#if onglet.icone === 'compta' && $badgeAValider > 0}
 					<span class="badge" aria-label="{$badgeAValider} dépenses à valider">{$badgeAValider}</span>
 				{/if}
-				{#if onglet.icone === 'chantiers'}
+				{#if onglet.icone === 'lieux'}
 					<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
 						<path d="M3 21h18" />
 						<path d="M5 21V7l8-4v18" />

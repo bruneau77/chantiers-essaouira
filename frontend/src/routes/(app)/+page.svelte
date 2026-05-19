@@ -4,37 +4,61 @@
 	import { auth, apiAuth } from '$lib/stores/auth.js';
 	import { nomComplet } from '$lib/utils/nom.js';
 
-	let chantiers = $state([]);
+	// Refonte 2026-05-18 : homepage role-adaptive.
+	//   - admin : liste des Postes EN_COURS tous Lieux confondus
+	//             (vision « qu'est-ce qui bouge en ce moment »)
+	//   - chef  : liste de SES Lieux (filtre serveur via /api/lieux)
+
 	let chargement = $state(true);
 	let erreur = $state('');
-	let filtreStatut = $state('');
+	let postesEnCours = $state([]);
+	let mesLieux = $state([]);
 
-	const STATUTS = {
-		prospect: { label: 'Prospect', couleur: '#8a8a8a' },
-		en_attente: { label: 'En attente', couleur: '#c97b2b' },
-		en_cours: { label: 'En cours', couleur: '#2d7a4f' },
-		pause: { label: 'Pause', couleur: '#b03a2e' },
-		termine: { label: 'Terminé', couleur: '#1e4d6b' },
-		cloture: { label: 'Clôturé', couleur: '#5a5a5a' },
-		annule: { label: 'Annulé', couleur: '#b03a2e' },
+	const STATUTS_LIEU = {
+		PROSPECT: { label: 'Prospect', couleur: '#8a8a8a' },
+		EN_COURS: { label: 'En cours', couleur: '#2d7a4f' },
+		TERMINE: { label: 'Terminé', couleur: '#1e4d6b' }
 	};
 
-	async function chargerChantiers() {
-		chargement = true;
-		erreur = '';
-		try {
-			let url = '/api/chantiers';
-			if (filtreStatut) url += `?statut=${filtreStatut}`;
+	function formaterDh(centimes) {
+		if (centimes === null || centimes === undefined) return '—';
+		const dh = Math.round(centimes / 100);
+		return dh.toLocaleString('fr-FR').replace(/,/g, ' ') + ' DH';
+	}
 
-			const res = await apiAuth(url);
+	function totalPaye(poste) {
+		if (!poste.paiements) return 0;
+		return poste.paiements.reduce((s, p) => s + p.montantCentimes, 0);
+	}
+
+	async function chargerPourAdmin() {
+		try {
+			const res = await apiAuth('/api/postes?statut=EN_COURS');
 			if (!res.ok) {
-				const payload = await res.json();
-				erreur = payload.message || 'Erreur lors du chargement.';
+				const p = await res.json();
+				erreur = p.message || 'Erreur de chargement.';
 				return;
 			}
 			const payload = await res.json();
-			chantiers = payload.data ?? [];
-		} catch (e) {
+			postesEnCours = payload.data ?? [];
+		} catch {
+			erreur = 'Impossible de contacter le serveur.';
+		} finally {
+			chargement = false;
+		}
+	}
+
+	async function chargerPourChef() {
+		try {
+			const res = await apiAuth('/api/lieux');
+			if (!res.ok) {
+				const p = await res.json();
+				erreur = p.message || 'Erreur de chargement.';
+				return;
+			}
+			const payload = await res.json();
+			mesLieux = payload.data ?? [];
+		} catch {
 			erreur = 'Impossible de contacter le serveur.';
 		} finally {
 			chargement = false;
@@ -42,58 +66,29 @@
 	}
 
 	onMount(() => {
-		chargerChantiers();
+		if ($auth.utilisateur?.role === 'admin') {
+			chargerPourAdmin();
+		} else {
+			chargerPourChef();
+		}
 	});
-
-	// Recharger quand le filtre change
-	$effect(() => {
-		// On lit filtreStatut pour créer la dépendance réactive
-		const _f = filtreStatut;
-		chargerChantiers();
-	});
-
-	function formaterDate(dateStr) {
-		if (!dateStr) return '—';
-		const d = new Date(dateStr);
-		return d.toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit', year: 'numeric' });
-	}
 </script>
 
 <svelte:head>
-	<title>Chantiers — Ludimmo</title>
+	<title>Accueil — Ludimmo</title>
 </svelte:head>
 
 <div class="page">
 	<header class="entete-page">
 		<p class="bonjour">Bonjour, {$auth.utilisateur?.prenom || ''}</p>
-		<h1>Chantiers</h1>
+		{#if $auth.utilisateur?.role === 'admin'}
+			<h1>Postes en cours</h1>
+			<p class="sous-titre">Ce qui bouge en ce moment sur tous les lieux.</p>
+		{:else}
+			<h1>Mes lieux</h1>
+		{/if}
 	</header>
 
-	<!-- Filtres -->
-	<div class="filtres">
-		<button
-			class="filtre"
-			class:actif={filtreStatut === ''}
-			onclick={() => filtreStatut = ''}
-		>Tous</button>
-		<button
-			class="filtre"
-			class:actif={filtreStatut === 'en_cours'}
-			onclick={() => filtreStatut = 'en_cours'}
-		>En cours</button>
-		<button
-			class="filtre"
-			class:actif={filtreStatut === 'prospect'}
-			onclick={() => filtreStatut = 'prospect'}
-		>Prospects</button>
-		<button
-			class="filtre"
-			class:actif={filtreStatut === 'termine'}
-			onclick={() => filtreStatut = 'termine'}
-		>Terminés</button>
-	</div>
-
-	<!-- Contenu -->
 	{#if chargement}
 		<div class="etat-central">
 			<div class="spinner"></div>
@@ -101,69 +96,71 @@
 	{:else if erreur}
 		<div class="etat-central">
 			<p class="erreur-message">{erreur}</p>
-			<button class="bouton-secondaire bouton-retry" onclick={chargerChantiers}>
-				Réessayer
-			</button>
 		</div>
-	{:else if chantiers.length === 0}
-		<div class="message-vide">
-			<p>Aucun chantier{filtreStatut ? ' avec ce statut' : ''}.</p>
-			{#if $auth.utilisateur?.role === 'admin'}
-				<p class="indication">Appuyez sur + pour créer votre premier chantier.</p>
-			{:else}
-				<p class="indication">Les chantiers s'afficheront ici quand ils vous seront assignés.</p>
-			{/if}
+	{:else if $auth.utilisateur?.role === 'admin'}
+		<!-- VUE ADMIN — Postes EN_COURS -->
+		{#if postesEnCours.length === 0}
+			<div class="message-vide">
+				<p>Aucun poste en cours.</p>
+				<p class="indication">Tous vos postes sont soit à faire, soit terminés.</p>
+			</div>
+		{:else}
+			<div class="liste-cartes">
+				{#each postesEnCours as poste (poste.id)}
+					<button
+						class="carte"
+						onclick={() => goto(`/lieux/${poste.lieu.id}/postes/${poste.id}`)}
+					>
+						<div class="carte-meta">
+							<span class="ref-lieu">{poste.lieu.reference}</span>
+							<span class="nom-lieu">{poste.lieu.nom}</span>
+						</div>
+						<h2 class="titre-poste">{poste.titre}</h2>
+						{#if poste.montantClientCentimes !== undefined}
+							<div class="ligne-montant">
+								<span class="label-montant">Montant client</span>
+								<span class="valeur-montant">{formaterDh(poste.montantClientCentimes)}</span>
+							</div>
+						{/if}
+					</button>
+				{/each}
+			</div>
+		{/if}
+
+		<div class="actions-globales">
+			<a href="/lieux" class="bouton-secondaire">Tous les lieux</a>
 		</div>
 	{:else}
-		<div class="liste-chantiers">
-			{#each chantiers as chantier (chantier.id)}
-				<button
-					class="carte-chantier"
-					onclick={() => goto(`/chantiers/${chantier.id}`)}
-				>
-					<div class="carte-entete">
-						<span class="numero">{chantier.numero}</span>
-						<span
-							class="badge-statut"
-							style:background={STATUTS[chantier.statut]?.couleur ?? '#8a8a8a'}
-						>
-							{STATUTS[chantier.statut]?.label ?? chantier.statut}
-						</span>
-					</div>
-					<h2 class="titre">{chantier.titre}</h2>
-					<p class="adresse">{chantier.adresseChantier}</p>
-					<div class="carte-pied">
-						<span class="client">
-							{nomComplet(chantier.client)}
-						</span>
-						<span class="date">{formaterDate(chantier.creeLe)}</span>
-					</div>
-					{#if chantier._count}
-						<div class="compteurs">
-							{#if chantier._count.devis > 0}
-								<span class="compteur">{chantier._count.devis} devis</span>
-							{/if}
-							{#if chantier._count.photos > 0}
-								<span class="compteur">{chantier._count.photos} photos</span>
-							{/if}
+		<!-- VUE CHEF — Mes Lieux -->
+		{#if mesLieux.length === 0}
+			<div class="message-vide">
+				<p>Aucun lieu ne vous est assigné pour le moment.</p>
+			</div>
+		{:else}
+			<div class="liste-cartes">
+				{#each mesLieux as lieu (lieu.id)}
+					<button class="carte" onclick={() => goto(`/lieux/${lieu.id}`)}>
+						<div class="carte-entete">
+							<span class="ref-lieu">{lieu.reference}</span>
+							<span
+								class="badge-statut"
+								style:background={STATUTS_LIEU[lieu.statut]?.couleur ?? '#8a8a8a'}
+							>
+								{STATUTS_LIEU[lieu.statut]?.label ?? lieu.statut}
+							</span>
 						</div>
-					{/if}
-				</button>
-			{/each}
-		</div>
-	{/if}
-
-	<!-- Bouton FAB pour créer (admin seulement) -->
-	{#if $auth.utilisateur?.role === 'admin'}
-		<button
-			class="fab"
-			onclick={() => goto('/chantiers/nouveau')}
-			aria-label="Nouveau chantier"
-		>
-			<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
-				<path d="M12 5v14M5 12h14" />
-			</svg>
-		</button>
+						<h2 class="titre-lieu">{lieu.nom}</h2>
+						<p class="adresse">{lieu.adresse}</p>
+						{#if lieu.client}
+							<p class="client">{nomComplet(lieu.client)}</p>
+						{/if}
+						{#if lieu._count?.postes}
+							<p class="compteur">{lieu._count.postes} poste{lieu._count.postes > 1 ? 's' : ''}</p>
+						{/if}
+					</button>
+				{/each}
+			</div>
+		{/if}
 	{/if}
 </div>
 
@@ -173,43 +170,15 @@
 	.entete-page { margin-bottom: var(--esp-lg); }
 	.bonjour { font-size: 14px; color: var(--couleur-texte-secondaire); margin-bottom: var(--esp-xs); }
 	h1 { font-size: 26px; font-weight: 700; letter-spacing: -0.02em; }
+	.sous-titre { font-size: 13px; color: var(--couleur-texte-leger); margin-top: var(--esp-xs); }
 
-	/* Filtres horizontaux */
-	.filtres {
-		display: flex;
-		gap: var(--esp-sm);
-		margin-bottom: var(--esp-lg);
-		overflow-x: auto;
-		-webkit-overflow-scrolling: touch;
-		scrollbar-width: none;
-	}
-	.filtres::-webkit-scrollbar { display: none; }
-
-	.filtre {
-		flex-shrink: 0;
-		padding: var(--esp-sm) var(--esp-md);
-		border-radius: 20px;
-		font-size: 14px;
-		font-weight: 500;
-		background: var(--couleur-fond-carte);
-		border: 1px solid var(--couleur-bordure);
-		color: var(--couleur-texte-secondaire);
-		transition: all 0.15s;
-	}
-	.filtre.actif {
-		background: var(--couleur-primaire);
-		color: white;
-		border-color: var(--couleur-primaire);
-	}
-
-	/* Liste des cartes */
-	.liste-chantiers {
+	.liste-cartes {
 		display: flex;
 		flex-direction: column;
 		gap: var(--esp-md);
 	}
 
-	.carte-chantier {
+	.carte {
 		display: block;
 		width: 100%;
 		text-align: left;
@@ -218,10 +187,41 @@
 		border-radius: var(--rayon-lg);
 		padding: var(--esp-md);
 		box-shadow: var(--ombre-sm);
-		transition: box-shadow 0.15s;
 	}
-	.carte-chantier:active {
-		box-shadow: var(--ombre-md);
+	.carte:active { box-shadow: var(--ombre-md); }
+
+	.carte-meta {
+		display: flex;
+		gap: var(--esp-sm);
+		align-items: baseline;
+		margin-bottom: var(--esp-sm);
+	}
+
+	.ref-lieu {
+		font-size: 12px;
+		font-weight: 600;
+		color: var(--couleur-texte-leger);
+		letter-spacing: 0.04em;
+	}
+
+	.nom-lieu {
+		font-size: 13px;
+		color: var(--couleur-texte-secondaire);
+		font-weight: 500;
+	}
+
+	.titre-poste {
+		font-size: 17px;
+		font-weight: 600;
+		color: var(--couleur-texte);
+		margin-bottom: var(--esp-sm);
+	}
+
+	.titre-lieu {
+		font-size: 17px;
+		font-weight: 600;
+		color: var(--couleur-texte);
+		margin-bottom: var(--esp-xs);
 	}
 
 	.carte-entete {
@@ -229,13 +229,6 @@
 		justify-content: space-between;
 		align-items: center;
 		margin-bottom: var(--esp-sm);
-	}
-
-	.numero {
-		font-size: 12px;
-		font-weight: 600;
-		color: var(--couleur-texte-leger);
-		letter-spacing: 0.04em;
 	}
 
 	.badge-statut {
@@ -248,34 +241,18 @@
 		letter-spacing: 0.03em;
 	}
 
-	.titre {
-		font-size: 17px;
-		font-weight: 600;
-		color: var(--couleur-texte);
-		margin-bottom: var(--esp-xs);
-	}
-
 	.adresse {
 		font-size: 14px;
 		color: var(--couleur-texte-secondaire);
-		margin-bottom: var(--esp-md);
+		margin-bottom: var(--esp-sm);
 	}
 
-	.carte-pied {
-		display: flex;
-		justify-content: space-between;
-		align-items: center;
+	.client {
 		font-size: 13px;
 		color: var(--couleur-texte-leger);
+		font-weight: 500;
 	}
 
-	.client { font-weight: 500; }
-
-	.compteurs {
-		display: flex;
-		gap: var(--esp-sm);
-		margin-top: var(--esp-sm);
-	}
 	.compteur {
 		font-size: 12px;
 		color: var(--couleur-primaire);
@@ -283,9 +260,29 @@
 		padding: 2px 8px;
 		border-radius: 8px;
 		font-weight: 500;
+		display: inline-block;
+		margin-top: var(--esp-sm);
 	}
 
-	/* États centraux */
+	.ligne-montant {
+		display: flex;
+		justify-content: space-between;
+		align-items: baseline;
+		padding-top: var(--esp-sm);
+		border-top: 1px dashed var(--couleur-bordure);
+	}
+
+	.label-montant {
+		font-size: 12px;
+		color: var(--couleur-texte-leger);
+	}
+
+	.valeur-montant {
+		font-size: 16px;
+		font-weight: 700;
+		color: var(--couleur-texte);
+	}
+
 	.etat-central {
 		display: flex;
 		flex-direction: column;
@@ -308,10 +305,7 @@
 		color: var(--couleur-erreur);
 		font-size: 15px;
 		text-align: center;
-		margin-bottom: var(--esp-md);
 	}
-
-	.bouton-retry { width: auto; padding: 0 var(--esp-lg); }
 
 	.message-vide {
 		background: var(--couleur-fond-carte);
@@ -332,24 +326,21 @@
 		margin-top: var(--esp-sm);
 	}
 
-	/* Bouton flottant + */
-	.fab {
-		position: fixed;
-		bottom: calc(var(--hauteur-nav) + var(--safe-bas) + var(--esp-lg));
-		right: var(--esp-lg);
-		width: 56px;
-		height: 56px;
-		border-radius: 50%;
-		background: var(--couleur-primaire);
-		color: white;
+	.actions-globales {
+		margin-top: var(--esp-lg);
 		display: flex;
-		align-items: center;
 		justify-content: center;
-		box-shadow: var(--ombre-lg);
-		z-index: 10;
-		transition: transform 0.15s;
 	}
-	.fab:active {
-		transform: scale(0.92);
+
+	.bouton-secondaire {
+		display: inline-block;
+		padding: var(--esp-md) var(--esp-lg);
+		background: var(--couleur-fond-carte);
+		border: 1.5px solid var(--couleur-bordure-forte);
+		color: var(--couleur-primaire);
+		border-radius: var(--rayon-md);
+		font-weight: 600;
+		font-size: 14px;
+		text-decoration: none;
 	}
 </style>

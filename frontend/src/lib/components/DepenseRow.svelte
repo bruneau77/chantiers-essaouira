@@ -4,9 +4,15 @@
 	import { nomComplet } from '$lib/utils/nom.js';
 	import AjoutDepenseForm from './AjoutDepenseForm.svelte';
 
+	// Refonte 2026-05-18 :
+	//   - chantierId → lieuId (props et navigation)
+	//   - affichage du Poste rattaché si présent (depense.poste)
+	//   - affichage du fournisseur (texte libre) si présent
+	//   - prop avecLieu (ex-avecChantier) : utile sur le dashboard admin
+	//     qui agrège les dépenses tous lieux confondus
 	let {
 		depense,
-		avecChantier = false,  // affiche le nom du chantier (utile sur tableau de bord admin)
+		avecLieu = false,
 		onChange = () => {}
 	} = $props();
 
@@ -35,8 +41,6 @@
 	const estProprietaire = $derived(depense.saisieParId === $auth.utilisateur?.id);
 	const estAValider = $derived(depense.statut === 'A_VALIDER');
 
-	// Chef peut éditer/supprimer sa propre dépense tant que A_VALIDER
-	// Admin peut toujours éditer
 	const peutEditer = $derived(estAdmin || (estProprietaire && estAValider));
 	const peutSupprimer = $derived(estAdmin || (estProprietaire && estAValider));
 
@@ -44,8 +48,6 @@
 		actionEnCours = true;
 		erreur = '';
 		try {
-			// apiAuth force toujours Content-Type: application/json → Fastify
-			// refuse un body vide avec ce header. On envoie un objet JSON vide.
 			const res = await apiAuth(`/api/depenses/${depense.id}/valider`, {
 				method: 'PATCH',
 				body: JSON.stringify({})
@@ -55,7 +57,6 @@
 				erreur = p.message || 'Erreur lors de la validation.';
 				return;
 			}
-			// Décrément immédiat du badge NavBas sans attendre le polling 60 s.
 			badgeAValider.decrementer();
 			onChange();
 		} catch {
@@ -70,8 +71,6 @@
 		actionEnCours = true;
 		erreur = '';
 		try {
-			// Idem valider() : apiAuth force Content-Type: application/json,
-			// donc on doit fournir un body JSON même vide.
 			const res = await apiAuth(`/api/depenses/${depense.id}`, {
 				method: 'DELETE',
 				body: JSON.stringify({})
@@ -81,8 +80,6 @@
 				erreur = p.message || 'Erreur lors de la suppression.';
 				return;
 			}
-			// Si on supprime une dépense qui était encore A_VALIDER, le compteur
-			// du badge admin baisse. Si elle était déjà VALIDEE, pas d'impact.
 			if (depense.statut === 'A_VALIDER') {
 				badgeAValider.decrementer();
 			}
@@ -102,7 +99,7 @@
 
 {#if modeEdition}
 	<AjoutDepenseForm
-		chantierId={depense.chantierId}
+		lieuId={depense.lieuId}
 		depenseExistante={depense}
 		onTermine={onEditionTerminee}
 		onAnnule={() => (modeEdition = false)}
@@ -126,13 +123,27 @@
 
 		<p class="description">{depense.description}</p>
 
+		{#if depense.poste}
+			<p class="info-extra">
+				<span class="info-icone" aria-hidden="true">📍</span>
+				Poste : <strong>{depense.poste.titre}</strong>
+			</p>
+		{/if}
+
+		{#if depense.fournisseur}
+			<p class="info-extra">
+				<span class="info-icone" aria-hidden="true">🏪</span>
+				Fournisseur : {depense.fournisseur}
+			</p>
+		{/if}
+
 		<div class="meta">
 			<span>{formaterDate(depense.date)}</span>
 			{#if depense.saisiePar}
 				<span>· {nomComplet(depense.saisiePar)}</span>
 			{/if}
-			{#if avecChantier && depense.chantier}
-				<span>· <a href="/chantiers/{depense.chantier.id}/compta" class="lien-chantier">{depense.chantier.numero}</a></span>
+			{#if avecLieu && depense.lieu}
+				<span>· <a href="/lieux/{depense.lieu.id}/compta" class="lien-lieu">{depense.lieu.reference}</a></span>
 			{/if}
 		</div>
 
@@ -144,7 +155,6 @@
 			<p class="erreur">{erreur}</p>
 		{/if}
 
-		<!-- Boutons d'action -->
 		<div class="actions">
 			{#if estAdmin && estAValider}
 				<button class="bouton bouton-valider" onclick={valider} disabled={actionEnCours}>
@@ -217,29 +227,38 @@
 		border-radius: 10px;
 		background: #fdf3f1;
 		color: #b03a2e;
-		border: 1px solid #e0a8a0;
 	}
-
 	.tag-statut {
 		font-size: 11px;
 		font-weight: 600;
 		padding: 2px 8px;
 		border-radius: 10px;
 	}
-	.tag-a-valider { background: #fdf3e8; color: #c97b2b; border: 1px solid #e8c89c; }
-	.tag-validee { background: #e7f5ed; color: #2d7a4f; border: 1px solid #b6dec5; }
+	.tag-a-valider { background: #fef3e5; color: #c97b2b; }
+	.tag-validee { background: #e8f5ec; color: #2d7a4f; }
 
 	.montant {
-		font-size: 16px;
+		font-size: 18px;
 		font-weight: 700;
 		color: var(--couleur-texte);
-		white-space: nowrap;
 	}
 
 	.description {
 		font-size: 14px;
 		color: var(--couleur-texte);
 		line-height: 1.4;
+	}
+
+	.info-extra {
+		font-size: 13px;
+		color: var(--couleur-texte-secondaire);
+		display: flex;
+		align-items: center;
+		gap: var(--esp-xs);
+	}
+
+	.info-icone {
+		font-size: 14px;
 	}
 
 	.meta {
@@ -249,7 +268,12 @@
 		flex-wrap: wrap;
 		gap: 4px;
 	}
-	.lien-chantier { color: var(--couleur-primaire); text-decoration: none; font-weight: 600; }
+
+	.lien-lieu {
+		color: var(--couleur-primaire);
+		font-weight: 600;
+		text-decoration: none;
+	}
 
 	.audit {
 		font-size: 11px;
@@ -258,11 +282,8 @@
 	}
 
 	.erreur {
-		font-size: 13px;
 		color: var(--couleur-erreur);
-		padding: var(--esp-xs);
-		background: #fdf3f1;
-		border-radius: var(--rayon-sm);
+		font-size: 13px;
 	}
 
 	.actions {
@@ -272,30 +293,32 @@
 	}
 
 	.bouton {
-		padding: 8px var(--esp-md);
-		border-radius: var(--rayon-sm);
+		padding: var(--esp-sm) var(--esp-md);
+		border-radius: var(--rayon-md);
 		font-size: 13px;
 		font-weight: 600;
 		min-height: 36px;
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-		gap: 4px;
 	}
-	.bouton:active:not(:disabled) { opacity: 0.85; }
-	.bouton:disabled { opacity: 0.5; cursor: not-allowed; }
 
-	.bouton-valider { background: #2d7a4f; color: white; flex: 1; }
+	.bouton-valider {
+		background: #2d7a4f;
+		color: white;
+	}
+
 	.bouton-modifier {
-		background: var(--couleur-fond);
+		background: transparent;
 		color: var(--couleur-primaire);
 		border: 1.5px solid var(--couleur-primaire);
-		flex: 1;
 	}
+
 	.bouton-supprimer {
 		background: transparent;
-		color: #b03a2e;
-		border: 1.5px solid #e0a8a0;
-		padding: 8px 12px;
+		color: var(--couleur-erreur);
+		border: 1.5px solid rgba(176, 58, 46, 0.3);
+		padding: var(--esp-sm);
+	}
+
+	.bouton:disabled {
+		opacity: 0.5;
 	}
 </style>
