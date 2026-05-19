@@ -1,30 +1,68 @@
 /**
  * Seed Prisma — données de démonstration
  *
- * Crée :
- *  - 3 utilisateurs (Yassine admin, Dominique chef, Rachid sous-traitant)
- *  - 1 client de démo
- *  - Réglages par défaut
- *  - Le devis de référence Villa Pierre-Yves & Laurent (cas réel)
- *  - Quelques matériaux courants (ciment, sable, etc.)
- *  - Un fournisseur de démo
+ * Refonte Lieu / Poste / Paiement (session 2026-05-18, voir
+ * docs/JOURNAL.md). Crée :
+ *  - 1 ligne Reglages (valeurs par défaut)
+ *  - 4 utilisateurs (Yassine admin, Dominique admin, Rachid chef,
+ *                    Pierre-Yves client sans connexion)
+ *  - 1 Lieu  (L-2026-001 « Villa Pierre-Yves Laurent »)
+ *  - 3 Postes couvrant les trois statuts (TERMINE / EN_COURS / A_FAIRE)
+ *  - 2 Paiements (un VIREMENT solde Poste A, un CASH partiel Poste B)
+ *  - 3 Dépenses (2 VALIDEE affectées à un Poste, 1 A_VALIDER globale)
+ *  - 2 Budgets Lieu (un VERSEMENT global, un VERSEMENT affecté au Poste A)
  *
- * Lancement : `npx prisma db seed`
+ * Le statut du Lieu est recalculé applicativement après création des
+ * Postes (via lib/postesHelpers.recalculerStatutLieu) et doit aboutir
+ * à EN_COURS (mix A_FAIRE/EN_COURS/TERMINE).
+ *
+ * Lancement : `npx prisma db seed` (ou indirectement via
+ * `npx prisma migrate reset --force` qui appelle le seed).
  */
 
 import { PrismaClient } from '@prisma/client'
 import bcrypt from 'bcrypt'
-import { calculerLigneDevis, calculerTotauxDevis, calculerEcheancier } from '../src/lib/calculsDevis.js'
 import { calculerFraisEssence } from '../src/lib/fraisKm.js'
+import { recalculerStatutLieu } from '../src/lib/postesHelpers.js'
 
 const prisma = new PrismaClient()
+
+// -------------------------------------------------------------------
+// Helpers de date et de calcul
+// -------------------------------------------------------------------
+
+/**
+ * Retourne une Date située N jours avant maintenant.
+ */
+function ilYaJours(n) {
+  const d = new Date()
+  d.setDate(d.getDate() - n)
+  return d
+}
+
+/**
+ * Calcule la marge (montant + pourcent arrondi 2 décimales) à partir
+ * d'un brut et d'un client. Logique identique à celle de routes/postes.js
+ * pour garantir la cohérence des données seed avec celles créées via API.
+ */
+function calculerMarge(montantBrutCentimes, montantClientCentimes) {
+  const margeCentimes = montantClientCentimes - montantBrutCentimes
+  const margePourcent = montantBrutCentimes > 0
+    ? parseFloat(((margeCentimes / montantBrutCentimes) * 100).toFixed(2))
+    : 0
+  return { margeCentimes, margePourcent }
+}
+
+// -------------------------------------------------------------------
+// Main
+// -------------------------------------------------------------------
 
 async function main() {
   console.log('🌱 Démarrage du seed...')
 
-  // -----------------------------------------------------------------
+  // -------------------------------------------------------------------
   // RÉGLAGES PAR DÉFAUT
-  // -----------------------------------------------------------------
+  // -------------------------------------------------------------------
   const reglages = await prisma.reglages.upsert({
     where: { id: 1 },
     update: {},
@@ -32,16 +70,14 @@ async function main() {
   })
   console.log('  ✓ Réglages par défaut')
 
-  // -----------------------------------------------------------------
+  // -------------------------------------------------------------------
   // UTILISATEURS
-  // -----------------------------------------------------------------
+  // -------------------------------------------------------------------
   const motDePasseAdmin = await bcrypt.hash('admin123', 12)
   const motDePasseChef = await bcrypt.hash('chef123', 12)
 
-  const yassine = await prisma.utilisateur.upsert({
-    where: { email: 'yassine.bruneau@gmail.com' },
-    update: { role: 'admin' },
-    create: {
+  const yassine = await prisma.utilisateur.create({
+    data: {
       email: 'yassine.bruneau@gmail.com',
       motDePasseHash: motDePasseAdmin,
       prenom: 'Yassine',
@@ -51,10 +87,8 @@ async function main() {
     },
   })
 
-  const dominique = await prisma.utilisateur.upsert({
-    where: { email: 'dbruneau77@gmail.com' },
-    update: { role: 'admin' },
-    create: {
+  const dominique = await prisma.utilisateur.create({
+    data: {
       email: 'dbruneau77@gmail.com',
       motDePasseHash: motDePasseChef,
       prenom: 'Dominique',
@@ -65,219 +99,244 @@ async function main() {
     },
   })
 
-  // Rachid : email placeholder en attendant le vrai. À remplacer
-  // quand Rachid aura communiqué son adresse mail.
-  // Nom 'El Mansouri' mis dans `update` ET `create` pour que le re-seed
-  // sans reset DB corrige aussi les enregistrements existants qui avaient
-  // le placeholder '(à compléter)'.
-  const rachid = await prisma.utilisateur.upsert({
-    where: { email: 'rachid@ludimmo.ma' },
-    update: { role: 'chef', nom: 'El Mansouri' },
-    create: {
-      email: 'rachid@ludimmo.ma',
+  // Rachid AQOUDI — correction nom + email réel (cf. JOURNAL 2026-05-18,
+  // l'ancien « El Mansouri / rachid@ludimmo.ma » était une erreur dev).
+  const rachid = await prisma.utilisateur.create({
+    data: {
+      email: 'rachid_aqoudi@hotmail.fr',
       motDePasseHash: motDePasseChef,
       prenom: 'Rachid',
-      nom: 'El Mansouri',
+      nom: 'AQOUDI',
       role: 'chef',
       partDefautPct: 50,
     },
   })
 
-  const clientDemo = await prisma.utilisateur.upsert({
-    where: { email: 'pierre-yves@example.com' },
-    update: {},
-    create: {
-      email: 'pierre-yves@example.com',
-      motDePasseHash: await bcrypt.hash('demo123', 12),
+  // Pierre-Yves : client typique créé via la modale du formulaire Lieu.
+  // Pas d'email, pas de mot de passe. On OMET motDePasseHash du data:{}
+  // (Prisma refuse `null` explicite sur un champ optionnel quand le
+  // client TS est strict — cf. galère session 2026-05-16).
+  const pierreYves = await prisma.utilisateur.create({
+    data: {
       prenom: 'Pierre-Yves',
       nom: 'Laurent',
+      adresse: 'Essaouira',
       role: 'client',
     },
   })
 
   console.log('  ✓ 4 utilisateurs créés (2 admin / 1 chef / 1 client)')
 
-  // -----------------------------------------------------------------
-  // FOURNISSEUR + MATÉRIAUX DE BASE
-  // -----------------------------------------------------------------
-  const fournisseurDemo = await prisma.fournisseur.upsert({
-    where: { id: 1 },
-    update: {},
-    create: {
-      id: 1,
-      nom: 'Fournisseur local Essaouira',
-      contact: 'À compléter',
-      telephone: '+212 5 ...',
-    },
-  })
-
-  const materiauxBase = [
-    { nom: 'Ciment 45', categorie: 'ciment_sable_chaux', uniteMesure: 'sac', prixCentimes: 8300 },
-    { nom: 'Sable (camion)', categorie: 'ciment_sable_chaux', uniteMesure: 'camion', prixCentimes: 140000 },
-    { nom: 'Chaux', categorie: 'ciment_sable_chaux', uniteMesure: 'sac', prixCentimes: 6500 },
-    { nom: 'Verre toiture standard', categorie: 'divers', uniteMesure: 'pièce', prixCentimes: 3500 },
-  ]
-
-  for (const mat of materiauxBase) {
-    await prisma.materiau.upsert({
-      where: { id: materiauxBase.indexOf(mat) + 1 },
-      update: {},
-      create: {
-        id: materiauxBase.indexOf(mat) + 1,
-        nom: mat.nom,
-        categorie: mat.categorie,
-        uniteMesure: mat.uniteMesure,
-        prixActuelCentimes: mat.prixCentimes,
-        fournisseurId: 1,
-      },
-    })
-  }
-  console.log(`  ✓ ${materiauxBase.length} matériaux de base créés`)
-
-  // -----------------------------------------------------------------
-  // CHANTIER DE RÉFÉRENCE : Villa Pierre-Yves & Laurent
-  // -----------------------------------------------------------------
-  // NOTE 2026-05-16 : `chefId` pointe désormais vers Rachid (chef de
-  // chantier terrain), conformément au cahier des charges Compta. Dominique
-  // reste admin/gérant commercial mais n'apparaît plus comme chef. On laisse
-  // `sousTraitantId` à null : Rachid n'est plus à la fois chef ET sous-traitant.
-  const chantierVillaPY = await prisma.chantier.upsert({
-    where: { numero: '2026-001' },
-    update: {
-      chefId: rachid.id,
-      sousTraitantId: null,
-    },
-    create: {
-      numero: '2026-001',
-      titre: 'Villa Pierre-Yves & Laurent',
-      description: 'Réfection toiture 300 m² — terrasse principale',
-      adresseChantier: 'Essaouira (à compléter)',
-      chefId: rachid.id,
-      clientId: clientDemo.id,
-      sousTraitantId: null,
-      statut: 'en_cours',
-      distanceAllerKm: 8,
-      nombreAllerRetourPrevu: 12,
-    },
-  })
-
-  // Frais essence calculés selon la formule métier
+  // -------------------------------------------------------------------
+  // LIEU — Villa Pierre-Yves Laurent (L-2026-001)
+  // -------------------------------------------------------------------
   const fraisEssenceCentimes = calculerFraisEssence({
     distanceAllerKm: 8,
     nombreAllerRetourPrevu: 12,
-    reglages,
-  })
-  await prisma.chantier.update({
-    where: { id: chantierVillaPY.id },
-    data: { fraisEssenceCentimes },
-  })
-  console.log(`  ✓ Chantier Villa PY créé (frais essence ${fraisEssenceCentimes / 100} DH)`)
-
-  // -----------------------------------------------------------------
-  // DEVIS DE RÉFÉRENCE — reproduit fidèlement le devis Excel original
-  // -----------------------------------------------------------------
-  // Lignes brutes correspondant au fichier VILLA_PY_ET_LAURENT.ods
-  // Marge 15% par défaut sur tout (à ajuster ligne par ligne plus tard)
-  //
-  // TODO [vérif différée 2026-05-12] : ces 11 lignes produisent un total
-  // brut de 104 860 DH, alors que docs/devis_reference.md annonce ~129 915 DH.
-  // Écart de ~25 000 DH = des lignes manquantes (probablement). À
-  // rapprocher avec le fichier Excel d'origine quand il sera disponible.
-  // La LOGIQUE de calcul est validée — seules les données peuvent être
-  // incomplètes.
-  const lignesBrutes = [
-    // MAIN D'ŒUVRE
-    { section: 'main_oeuvre', description: 'Retrait du carrelage ancien', typeMesure: 'surface_m2', quantite: 300, prixUnitaireBrutDh: 30, observation: 'Évacuation incluse' },
-    { section: 'main_oeuvre', description: 'Égalisation des surfaces', typeMesure: 'surface_m2', quantite: 300, prixUnitaireBrutDh: 20, observation: '' },
-    { section: 'main_oeuvre', description: 'Pose carrelage neuf', typeMesure: 'surface_m2', quantite: 300, prixUnitaireBrutDh: 60, observation: 'Pose alignée à la ligne' },
-    { section: 'main_oeuvre', description: 'Joints', typeMesure: 'surface_m2', quantite: 300, prixUnitaireBrutDh: 15, observation: '' },
-    { section: 'main_oeuvre', description: 'Étanchéité raccords', typeMesure: 'forfait', quantite: 1, prixUnitaireBrutDh: 8000, observation: 'Hors trémie cheminée (en attente)' },
-    // MATÉRIEL
-    { section: 'materiel', description: 'Camions de sable', typeMesure: 'quantite', quantite: 3, prixUnitaireBrutDh: 1400, observation: '' },
-    { section: 'materiel', description: 'Ciment 45', typeMesure: 'quantite', quantite: 60, prixUnitaireBrutDh: 83, observation: 'Sacs 50 kg' },
-    { section: 'materiel', description: 'Carrelage neuf', typeMesure: 'surface_m2', quantite: 310, prixUnitaireBrutDh: 145, observation: 'Sur-quantité 10 m² pour pertes' },
-    { section: 'materiel', description: 'Mortier-colle', typeMesure: 'quantite', quantite: 45, prixUnitaireBrutDh: 95, observation: 'Sacs' },
-    { section: 'materiel', description: 'Joint ciment blanc', typeMesure: 'quantite', quantite: 12, prixUnitaireBrutDh: 65, observation: '' },
-    { section: 'materiel', description: 'Verres de toiture', typeMesure: 'quantite', quantite: 5, prixUnitaireBrutDh: 35, observation: 'Remplacement casses' },
-  ]
-
-  // Numéro devis
-  const devisRef = await prisma.devis.upsert({
-    where: { numero: 'DEV-2026-001' },
-    update: {},
-    create: {
-      numero: 'DEV-2026-001',
-      chantierId: chantierVillaPY.id,
-      statut: 'accepte',
-      tempsTravailJours: 20,
-      observations: 'Tarifs valables 30 jours. Trémie cheminée non incluse (en attente devis séparé).',
+    reglages: {
+      consommationL100km: reglages.consommationL100km,
+      prixGasoilCentimes: reglages.prixGasoilCentimes,
+      usureCentimesParKm: reglages.usureCentimesParKm,
+      securiteAllerRetour: reglages.securiteAllerRetour,
     },
   })
 
-  // Créer les lignes
-  for (let i = 0; i < lignesBrutes.length; i++) {
-    const l = lignesBrutes[i]
-    const prixUnitaireBrutCentimes = l.prixUnitaireBrutDh * 100
-    const margePct = 15
-    const calculs = calculerLigneDevis({
-      prixUnitaireBrutCentimes,
-      quantite: l.quantite,
-      margePct,
-    })
-
-    await prisma.ligneDevis.create({
-      data: {
-        devisId: devisRef.id,
-        ordre: i + 1,
-        section: l.section,
-        description: l.description,
-        observation: l.observation || null,
-        typeMesure: l.typeMesure,
-        quantite: l.quantite,
-        prixUnitaireBrutCentimes,
-        margePct,
-        ...calculs,
-      },
-    })
-  }
-
-  // Mise à jour des totaux du devis
-  const lignesCreees = await prisma.ligneDevis.findMany({ where: { devisId: devisRef.id } })
-  const totaux = calculerTotauxDevis(lignesCreees)
-  await prisma.devis.update({
-    where: { id: devisRef.id },
+  const lieu = await prisma.lieu.create({
     data: {
-      totalBrutCentimes: totaux.totalBrutCentimes,
-      totalClientCentimes: totaux.totalClientCentimes,
-      margeMontantCentimes: totaux.margeMontantCentimes,
+      reference: 'L-2026-001',
+      nom: 'Villa Pierre-Yves Laurent',
+      clientId: pierreYves.id,
+      chefId: rachid.id,
+      adresse: 'Essaouira (à compléter)',
+      distanceAllerKm: 8,
+      nombreAllerRetourPrevu: 12,
+      fraisEssenceCentimes,
+      // statut par défaut PROSPECT — sera recalculé après les Postes
+    },
+  })
+  console.log(
+    `  ✓ Lieu ${lieu.reference} créé (frais essence ${(fraisEssenceCentimes / 100).toFixed(2)} DH)`,
+  )
+
+  // -------------------------------------------------------------------
+  // POSTES (3 — un par statut)
+  // -------------------------------------------------------------------
+
+  // Poste A — TERMINE et intégralement payé (réfection toiture, cas de
+  // référence métier).
+  const margeA = calculerMarge(1048600, 1205890)
+  const posteA = await prisma.poste.create({
+    data: {
+      lieuId: lieu.id,
+      titre: 'Réfection toiture terrasse principale',
+      description: 'Retrait du carrelage ancien, étanchéité, pose carrelage neuf.',
+      ordre: 1,
+      statut: 'TERMINE',
+      termineLe: ilYaJours(14),
+      montantBrutCentimes: 1048600,
+      montantClientCentimes: 1205890,
+      ...margeA,
     },
   })
 
-  console.log(`  ✓ Devis DEV-2026-001 créé`)
-  console.log(`     • Total brut : ${totaux.totalBrutCentimes / 100} DH`)
-  console.log(`     • Total client (marge 15%) : ${totaux.totalClientCentimes / 100} DH`)
-  console.log(`     • Marge totale : ${totaux.margeMontantCentimes / 100} DH`)
+  // Poste B — EN_COURS, partiellement payé
+  const margeB = calculerMarge(35000, 45000)
+  const posteB = await prisma.poste.create({
+    data: {
+      lieuId: lieu.id,
+      titre: '3 tables marbre + bibliothèque',
+      description: 'Fabrication 3 tables en marbre + 1 bibliothèque sur mesure.',
+      ordre: 2,
+      statut: 'EN_COURS',
+      montantBrutCentimes: 35000,
+      montantClientCentimes: 45000,
+      ...margeB,
+    },
+  })
 
-  // Échéancier 30/40/30
-  const echeancier = calculerEcheancier(totaux.totalClientCentimes, reglages)
-  for (const p of echeancier) {
-    await prisma.paiement.create({
-      data: {
-        chantierId: chantierVillaPY.id,
-        type: p.type,
-        pourcentage: p.pourcentage,
-        montantCentimes: p.montantCentimes,
-        statut: 'attendu',
-      },
-    })
-  }
-  console.log(`  ✓ Échéancier 30/40/30 créé (3 paiements)`)
+  // Poste C — A_FAIRE, pas encore commencé
+  const margeC = calculerMarge(8000, 11000)
+  const posteC = await prisma.poste.create({
+    data: {
+      lieuId: lieu.id,
+      titre: 'Contrôle piscine + dépannage électrique',
+      description: 'Diagnostic + petites interventions.',
+      ordre: 3,
+      statut: 'A_FAIRE',
+      montantBrutCentimes: 8000,
+      montantClientCentimes: 11000,
+      ...margeC,
+    },
+  })
 
+  console.log('  ✓ 3 postes créés (A=TERMINE / B=EN_COURS / C=A_FAIRE)')
+
+  // Recalcul du statut du Lieu d'après ses Postes (mix → EN_COURS attendu).
+  // On exerce la même fonction que celle utilisée par les routes — le seed
+  // doit produire une DB cohérente avec ce que produirait l'API en
+  // utilisation normale.
+  const nouveauStatutLieu = await recalculerStatutLieu(prisma, lieu.id)
+  console.log(`  ✓ Statut du Lieu recalculé : ${nouveauStatutLieu}`)
+
+  // -------------------------------------------------------------------
+  // PAIEMENTS
+  // -------------------------------------------------------------------
+  await prisma.paiement.create({
+    data: {
+      posteId: posteA.id,
+      date: ilYaJours(7),
+      montantCentimes: 1205890,
+      mode: 'VIREMENT',
+      description: 'Solde réfection toiture',
+    },
+  })
+  await prisma.paiement.create({
+    data: {
+      posteId: posteB.id,
+      date: ilYaJours(3),
+      montantCentimes: 20000,
+      mode: 'CASH',
+      description: 'Acompte début marbrerie',
+    },
+  })
+  console.log('  ✓ 2 paiements créés (Poste A intégralement payé / Poste B partiel)')
+
+  // -------------------------------------------------------------------
+  // DÉPENSES RACHID (3 — 2 validées affectées à un Poste, 1 globale à valider)
+  // -------------------------------------------------------------------
+  await prisma.depense.create({
+    data: {
+      lieuId: lieu.id,
+      posteId: posteA.id,
+      saisieParId: rachid.id,
+      date: ilYaJours(20),
+      categorie: 'MATERIEL',
+      montantCentimes: 80000,
+      description: 'Ciment + sable pour étanchéité',
+      fournisseur: 'Distributeur ciment Essaouira',
+      estAvancePersonnelle: false,
+      statut: 'VALIDEE',
+      valideeParId: dominique.id,
+      valideeLe: ilYaJours(18),
+    },
+  })
+  await prisma.depense.create({
+    data: {
+      lieuId: lieu.id,
+      posteId: posteB.id,
+      saisieParId: rachid.id,
+      date: ilYaJours(5),
+      categorie: 'MATERIEL',
+      montantCentimes: 12000,
+      description: 'Bois pour bibliothèque',
+      fournisseur: 'Hassan menuisier',
+      estAvancePersonnelle: false,
+      statut: 'VALIDEE',
+      valideeParId: dominique.id,
+      valideeLe: ilYaJours(4),
+    },
+  })
+  await prisma.depense.create({
+    data: {
+      lieuId: lieu.id,
+      saisieParId: rachid.id,
+      date: ilYaJours(1),
+      categorie: 'REPAS',
+      montantCentimes: 2500,
+      description: 'Repas équipe',
+      estAvancePersonnelle: false,
+      statut: 'A_VALIDER',
+    },
+  })
+  console.log(
+    '  ✓ 3 dépenses créées (2 VALIDEE affectées à un Poste / 1 A_VALIDER globale)',
+  )
+
+  // -------------------------------------------------------------------
+  // BUDGETS LIEU (cash Dominique → Rachid)
+  // -------------------------------------------------------------------
+  await prisma.budgetLieu.create({
+    data: {
+      lieuId: lieu.id,
+      // posteId null : versement global au Lieu
+      userId: rachid.id,
+      date: ilYaJours(30),
+      montantCentimes: 200000,
+      type: 'VERSEMENT',
+      description: 'Cash global pour démarrer le lieu',
+      creeParId: dominique.id,
+    },
+  })
+  await prisma.budgetLieu.create({
+    data: {
+      lieuId: lieu.id,
+      posteId: posteA.id, // affecté au Poste A (exerce le nouveau lien BudgetLieu.posteId)
+      userId: rachid.id,
+      date: ilYaJours(25),
+      montantCentimes: 500000,
+      type: 'VERSEMENT',
+      description: 'Cash affecté à la réfection toiture',
+      creeParId: dominique.id,
+    },
+  })
+  console.log('  ✓ 2 versements budget créés (1 global / 1 affecté Poste A)')
+
+  // -------------------------------------------------------------------
+  // RÉCAP FINAL
+  // -------------------------------------------------------------------
   console.log('\n✅ Seed terminé.')
   console.log('\nComptes de connexion :')
   console.log('  yassine.bruneau@gmail.com / admin123  (Yassine, admin)')
   console.log('  dbruneau77@gmail.com      / chef123   (Dominique, admin)')
-  console.log('  rachid@ludimmo.ma         / chef123   (Rachid, chef — email placeholder)')
+  console.log('  rachid_aqoudi@hotmail.fr  / chef123   (Rachid AQOUDI, chef)')
+  console.log('  Pierre-Yves Laurent       (client, pas de connexion)')
+  console.log(
+    `\nLieu : ${lieu.reference} — ${lieu.nom} (statut ${nouveauStatutLieu})`,
+  )
+  console.log('Postes :')
+  console.log(`  #${posteA.id} — ${posteA.titre}  [TERMINE, payé intégralement]`)
+  console.log(`  #${posteB.id} — ${posteB.titre}  [EN_COURS, partiellement payé]`)
+  console.log(`  #${posteC.id} — ${posteC.titre}  [A_FAIRE, aucun paiement]`)
 }
 
 main()
