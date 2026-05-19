@@ -2,21 +2,26 @@
  * Routes Compta
  *
  * Endpoints :
- *   GET /api/compta/dashboard           → tableau de bord admin (admin only)
- *   GET /api/chantiers/:id/compta       → vue compta par chantier (admin + chef sur SES chantiers)
- *   GET /api/chantiers/:id/budgets      → liste des versements/remboursements d'un chantier
+ *   GET /api/compta/dashboard         → tableau de bord admin (admin only)
+ *   GET /api/lieux/:id/compta         → vue compta d'un lieu (admin + chef sur SES lieux)
+ *   GET /api/lieux/:id/budgets        → liste des versements/remboursements d'un lieu
  *
- * Note : les 2 derniers sont montés sous /api/chantiers (préfixe différent),
- * mais on les regroupe ici pour la cohérence métier. Ils sont enregistrés
- * dans server.js sous un préfixe différent.
+ * Les 2 derniers sont montés sous /api/lieux (extension du domaine
+ * Lieu), enregistrés dans server.js via l'export `routesComptaLieu`.
  *
- * Calculs (centimes DH) :
- *  - budgetRecu          = Σ BudgetChantier.montantCentimes WHERE type = VERSEMENT
+ * Calculs (centimes DH) — par Lieu :
+ *  - budgetRecu          = Σ BudgetLieu.montantCentimes WHERE type = VERSEMENT
  *  - totalDepense        = Σ Depense.montantCentimes WHERE estAvancePersonnelle = false
  *  - soldeRestant        = budgetRecu - totalDepense
- *  - totalAvances        = Σ Depense.montantCentimes WHERE estAvancePersonnelle = true
- *  - totalRembourse      = Σ BudgetChantier.montantCentimes WHERE type = REMBOURSEMENT
- *  - dominiqueMeDoit     = totalAvances - totalRembourse
+ *  - totalAvancesPerso   = Σ Depense.montantCentimes WHERE estAvancePersonnelle = true
+ *  - totalRembourse      = Σ BudgetLieu.montantCentimes WHERE type = REMBOURSEMENT
+ *  - dominiqueMeDoit     = totalAvancesPerso - totalRembourse
+ *
+ * Refonte 2026-05-18 :
+ *  - chantier → lieu partout
+ *  - Dashboard admin remplace la section "paiements clients en attente"
+ *    par "créances à recouvrer" : Postes TERMINE non intégralement payés,
+ *    triés par termineLe asc (la plus ancienne créance d'abord).
  */
 
 import { PrismaClient } from '@prisma/client'
@@ -24,29 +29,31 @@ import { PrismaClient } from '@prisma/client'
 const prisma = new PrismaClient()
 
 // -------------------------------------------------------------------
-// Helpers — agrégats
+// Helpers — agrégats par Lieu
 // -------------------------------------------------------------------
 
 /**
- * Calcule les totaux compta pour un chantier donné.
+ * Calcule les totaux compta pour un Lieu donné.
  * Renvoie aussi la liste des dépenses et des budgets.
  */
-async function calculerComptaChantier(chantierId) {
+async function calculerComptaLieu(lieuId) {
   const [depenses, budgets] = await Promise.all([
     prisma.depense.findMany({
-      where: { chantierId },
+      where: { lieuId },
       include: {
         saisiePar: { select: { id: true, prenom: true, nom: true, role: true } },
         valideePar: { select: { id: true, prenom: true, nom: true } },
         corrigeePar: { select: { id: true, prenom: true, nom: true } },
+        poste: { select: { id: true, titre: true, statut: true } },
       },
       orderBy: { date: 'desc' },
     }),
-    prisma.budgetChantier.findMany({
-      where: { chantierId },
+    prisma.budgetLieu.findMany({
+      where: { lieuId },
       include: {
         user: { select: { id: true, prenom: true, nom: true } },
         creePar: { select: { id: true, prenom: true, nom: true } },
+        poste: { select: { id: true, titre: true } },
       },
       orderBy: { date: 'desc' },
     }),
@@ -78,6 +85,48 @@ async function calculerComptaChantier(chantierId) {
   }
 }
 
+/**
+ * Calcule les créances à recouvrer (dashboard admin).
+ *
+ * Retourne la liste des Postes TERMINE dont la somme des paiements
+ * est strictement inférieure à montantClientCentimes. Triés par
+ * termineLe ascendant (la plus vieille créance d'abord).
+ */
+async function calculerCreancesARecouvrer() {
+  // On charge tous les Postes TERMINE avec leurs paiements et le Lieu.
+  // Le volume est faible en V1 (quelques dizaines de postes max), on
+  // ne s'embête pas avec un raw SQL.
+  const postesTermine = await prisma.poste.findMany({
+    where: { statut: 'TERMINE' },
+    select: {
+      id: true,
+      titre: true,
+      montantClientCentimes: true,
+      termineLe: true,
+      lieu: { select: { id: true, reference: true, nom: true } },
+      paiements: { select: { montantCentimes: true } },
+    },
+    orderBy: { termineLe: 'asc' },
+  })
+
+  const creances = []
+  for (const p of postesTermine) {
+    const totalPayeCentimes = p.paiements.reduce((s, pa) => s + pa.montantCentimes, 0)
+    const resteCentimes = p.montantClientCentimes - totalPayeCentimes
+    if (resteCentimes > 0) {
+      creances.push({
+        lieu: p.lieu,
+        poste: { id: p.id, titre: p.titre },
+        montantClientCentimes: p.montantClientCentimes,
+        totalPayeCentimes,
+        resteCentimes,
+        termineLe: p.termineLe,
+      })
+    }
+  }
+  return creances
+}
+
 // -------------------------------------------------------------------
 // Plugin Fastify — préfixe /api/compta
 // -------------------------------------------------------------------
@@ -87,10 +136,10 @@ export default async function routesCompta(fastify) {
    * GET /api/compta/dashboard — tableau de bord admin
    *
    * Retourne :
-   *   - depensesAValider[]            : toutes les dépenses A_VALIDER, tous chantiers
-   *   - chantiersAvecSolde[]          : chantiers actifs avec solde budget
+   *   - depensesAValider[]             : toutes les dépenses A_VALIDER, tous lieux
+   *   - lieuxAvecSolde[]               : lieux EN_COURS avec leur solde budget
    *   - totalAvancesNonRembourseesCentimes : ce que Dominique doit à Rachid (cumulé)
-   *   - paiementsClientsEnAttente[]   : paiements clients statut "attendu"
+   *   - creancesARecouvrer[]           : Postes TERMINE non intégralement payés
    */
   fastify.get(
     '/dashboard',
@@ -101,35 +150,36 @@ export default async function routesCompta(fastify) {
         where: { statut: 'A_VALIDER' },
         include: {
           saisiePar: { select: { id: true, prenom: true, nom: true, role: true } },
-          chantier: { select: { id: true, numero: true, titre: true } },
+          lieu: { select: { id: true, reference: true, nom: true } },
+          poste: { select: { id: true, titre: true } },
         },
         orderBy: { date: 'asc' },
       })
 
-      // 2. Chantiers actifs avec leur solde budget
-      const chantiersActifs = await prisma.chantier.findMany({
-        where: { statut: { in: ['en_cours', 'en_attente', 'pause'] } },
+      // 2. Lieux en cours avec leur solde budget
+      const lieuxActifs = await prisma.lieu.findMany({
+        where: { statut: 'EN_COURS' },
         select: {
           id: true,
-          numero: true,
-          titre: true,
+          reference: true,
+          nom: true,
           statut: true,
           chef: { select: { id: true, prenom: true, nom: true } },
         },
         orderBy: { creeLe: 'desc' },
       })
 
-      const chantiersAvecSolde = []
+      const lieuxAvecSolde = []
       let totalAvancesNonRembourseesCentimes = 0
 
-      for (const c of chantiersActifs) {
-        const compta = await calculerComptaChantier(c.id)
-        chantiersAvecSolde.push({
-          id: c.id,
-          numero: c.numero,
-          titre: c.titre,
-          statut: c.statut,
-          chef: c.chef,
+      for (const l of lieuxActifs) {
+        const compta = await calculerComptaLieu(l.id)
+        lieuxAvecSolde.push({
+          id: l.id,
+          reference: l.reference,
+          nom: l.nom,
+          statut: l.statut,
+          chef: l.chef,
           budgetRecuCentimes: compta.budgetRecuCentimes,
           totalDepenseCentimes: compta.totalDepenseCentimes,
           soldeRestantCentimes: compta.soldeRestantCentimes,
@@ -138,28 +188,17 @@ export default async function routesCompta(fastify) {
         totalAvancesNonRembourseesCentimes += compta.dominiqueMeDoitCentimes
       }
 
-      // 3. Paiements clients en attente (statut "attendu")
-      const paiementsClientsEnAttente = await prisma.paiement.findMany({
-        where: { statut: 'attendu' },
-        include: {
-          chantier: {
-            select: {
-              id: true,
-              numero: true,
-              titre: true,
-              client: { select: { id: true, prenom: true, nom: true } },
-            },
-          },
-        },
-        orderBy: { dateAttendue: 'asc' },
-      })
+      // 3. Créances à recouvrer (remplace l'ancienne section "paiements
+      //    clients en attente" qui s'appuyait sur l'échéancier 30/40/30
+      //    supprimé).
+      const creancesARecouvrer = await calculerCreancesARecouvrer()
 
       return reply.send({
         data: {
           depensesAValider,
-          chantiersAvecSolde,
+          lieuxAvecSolde,
           totalAvancesNonRembourseesCentimes,
-          paiementsClientsEnAttente,
+          creancesARecouvrer,
         },
       })
     },
@@ -167,12 +206,12 @@ export default async function routesCompta(fastify) {
 }
 
 // -------------------------------------------------------------------
-// Plugin Fastify — préfixe /api/chantiers (extensions compta)
+// Plugin Fastify — préfixe /api/lieux (extensions compta)
 // -------------------------------------------------------------------
 
-export async function routesComptaChantier(fastify) {
+export async function routesComptaLieu(fastify) {
   /**
-   * GET /api/chantiers/:id/compta — vue compta d'un chantier
+   * GET /api/lieux/:id/compta — vue compta d'un lieu
    * Admin : toujours. Chef : uniquement si chefId === user.id.
    */
   fastify.get(
@@ -183,40 +222,40 @@ export async function routesComptaChantier(fastify) {
       if (isNaN(id)) {
         return reply.code(400).send({
           error: 'PARAM_INVALIDE',
-          message: 'Identifiant de chantier invalide.',
+          message: 'Identifiant de lieu invalide.',
         })
       }
 
-      const chantier = await prisma.chantier.findUnique({
+      const lieu = await prisma.lieu.findUnique({
         where: { id },
         select: {
           id: true,
-          numero: true,
-          titre: true,
+          reference: true,
+          nom: true,
           chefId: true,
           chef: { select: { id: true, prenom: true, nom: true } },
         },
       })
 
-      if (!chantier) {
+      if (!lieu) {
         return reply.code(404).send({
-          error: 'CHANTIER_INTROUVABLE',
-          message: 'Ce chantier n\'existe pas.',
+          error: 'LIEU_INTROUVABLE',
+          message: 'Ce lieu n\'existe pas.',
         })
       }
 
-      if (req.user.role === 'chef' && chantier.chefId !== req.user.id) {
+      if (req.user.role === 'chef' && lieu.chefId !== req.user.id) {
         return reply.code(403).send({
           error: 'ACCES_REFUSE',
-          message: 'Vous n\'avez pas accès à la compta de ce chantier.',
+          message: 'Vous n\'avez pas accès à la compta de ce lieu.',
         })
       }
 
-      const compta = await calculerComptaChantier(id)
+      const compta = await calculerComptaLieu(id)
 
       return reply.send({
         data: {
-          chantier,
+          lieu,
           ...compta,
         },
       })
@@ -224,7 +263,7 @@ export async function routesComptaChantier(fastify) {
   )
 
   /**
-   * GET /api/chantiers/:id/budgets — liste des versements/remboursements
+   * GET /api/lieux/:id/budgets — liste des versements/remboursements
    * Admin : toujours. Chef : uniquement si chefId === user.id.
    */
   fastify.get(
@@ -235,34 +274,35 @@ export async function routesComptaChantier(fastify) {
       if (isNaN(id)) {
         return reply.code(400).send({
           error: 'PARAM_INVALIDE',
-          message: 'Identifiant de chantier invalide.',
+          message: 'Identifiant de lieu invalide.',
         })
       }
 
-      const chantier = await prisma.chantier.findUnique({
+      const lieu = await prisma.lieu.findUnique({
         where: { id },
         select: { id: true, chefId: true },
       })
 
-      if (!chantier) {
+      if (!lieu) {
         return reply.code(404).send({
-          error: 'CHANTIER_INTROUVABLE',
-          message: 'Ce chantier n\'existe pas.',
+          error: 'LIEU_INTROUVABLE',
+          message: 'Ce lieu n\'existe pas.',
         })
       }
 
-      if (req.user.role === 'chef' && chantier.chefId !== req.user.id) {
+      if (req.user.role === 'chef' && lieu.chefId !== req.user.id) {
         return reply.code(403).send({
           error: 'ACCES_REFUSE',
-          message: 'Vous n\'avez pas accès à ce chantier.',
+          message: 'Vous n\'avez pas accès à ce lieu.',
         })
       }
 
-      const budgets = await prisma.budgetChantier.findMany({
-        where: { chantierId: id },
+      const budgets = await prisma.budgetLieu.findMany({
+        where: { lieuId: id },
         include: {
           user: { select: { id: true, prenom: true, nom: true } },
           creePar: { select: { id: true, prenom: true, nom: true } },
+          poste: { select: { id: true, titre: true } },
         },
         orderBy: { date: 'desc' },
       })

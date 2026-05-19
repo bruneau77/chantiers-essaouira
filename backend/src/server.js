@@ -2,6 +2,18 @@
  * Serveur Fastify — point d'entrée de l'API
  *
  * Démarrage : `npm run dev` (avec --watch) ou `npm start`
+ *
+ * Architecture refonte 2026-05-18 (cf. docs/JOURNAL.md) :
+ *   - /api/auth          : authentification (login, refresh, logout, me)
+ *   - /api/users         : liste utilisateurs (dropdowns admin)
+ *   - /api/clients       : création client inline (admin)
+ *   - /api/lieux         : CRUD Lieux + extensions compta (/:id/compta, /:id/budgets)
+ *   - /api/postes        : CRUD Postes (admin + chef avec restrictions)
+ *   - /api/paiements     : CRUD Paiements (admin)
+ *   - /api/depenses      : CRUD Dépenses (admin + chef)
+ *   - /api/budgets       : CRUD BudgetLieu (admin)
+ *   - /api/compta        : dashboard admin
+ *   - /api/admin         : maintenance (recalculer-statuts)
  */
 
 import 'dotenv/config'
@@ -19,12 +31,15 @@ import rolePlugin from './middleware/role.js'
 
 // Routes
 import authRoutes from './routes/auth.js'
-import chantiersRoutes from './routes/chantiers.js'
 import usersRoutes from './routes/users.js'
 import clientsRoutes from './routes/clients.js'
+import lieuxRoutes from './routes/lieux.js'
+import postesRoutes from './routes/postes.js'
+import paiementsRoutes from './routes/paiements.js'
 import depensesRoutes from './routes/depenses.js'
 import budgetsRoutes from './routes/budgets.js'
-import comptaRoutes, { routesComptaChantier } from './routes/compta.js'
+import comptaRoutes, { routesComptaLieu } from './routes/compta.js'
+import adminRoutes from './routes/admin.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -49,7 +64,7 @@ await fastify.register(jwt, {
   sign: { expiresIn: '15m' },
 })
 
-// Upload fichiers (photos chantier)
+// Upload fichiers (module Photos prévu mais sans API en V1)
 await fastify.register(multipart, {
   limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB max
 })
@@ -72,42 +87,36 @@ fastify.get('/api/health', async () => ({
   service: 'chantiers-essaouira-api',
 }))
 
-// Routes — Auth (priorité 1) ✓
+// -------------------------------------------------------------------
+// Routes — montage
+// -------------------------------------------------------------------
+
+// Auth (priorité 1) ✓
 await fastify.register(authRoutes, { prefix: '/api/auth' })
 
-// Routes — Chantiers (priorité 2) ✓
-await fastify.register(chantiersRoutes, { prefix: '/api/chantiers' })
-// Extensions compta du préfixe /api/chantiers :
-//   GET /api/chantiers/:id/compta
-//   GET /api/chantiers/:id/budgets
-await fastify.register(routesComptaChantier, { prefix: '/api/chantiers' })
-
-// Routes — Users (dropdowns frontend, admin only) ✓
+// Utilisateurs (dropdowns admin) ✓
 await fastify.register(usersRoutes, { prefix: '/api/users' })
 
-// Routes — Clients (création inline depuis le formulaire chantier, admin only) ✓
+// Clients (création inline) ✓
 await fastify.register(clientsRoutes, { prefix: '/api/clients' })
 
-// Routes — Compta (priorité 3) ✓
+// Lieux + extensions compta (compta/budgets d'un lieu) ✓
+await fastify.register(lieuxRoutes, { prefix: '/api/lieux' })
+await fastify.register(routesComptaLieu, { prefix: '/api/lieux' })
+
+// Postes ✓
+await fastify.register(postesRoutes, { prefix: '/api/postes' })
+
+// Paiements ✓
+await fastify.register(paiementsRoutes, { prefix: '/api/paiements' })
+
+// Compta — dépenses, budgets, dashboard ✓
 await fastify.register(depensesRoutes, { prefix: '/api/depenses' })
 await fastify.register(budgetsRoutes, { prefix: '/api/budgets' })
 await fastify.register(comptaRoutes, { prefix: '/api/compta' })
 
-// Routes (à implémenter progressivement)
-// import devisRoutes from './routes/devis.js'
-// import paiementsRoutes from './routes/paiements.js'
-// import avancesRoutes from './routes/avances.js'
-// import catalogueRoutes from './routes/catalogue.js'
-// import planningRoutes from './routes/planning.js'
-// import reglagesRoutes from './routes/reglages.js'
-//
-// await fastify.register(chantiersRoutes, { prefix: '/api/chantiers' })
-// await fastify.register(devisRoutes, { prefix: '/api/devis' })
-// await fastify.register(paiementsRoutes, { prefix: '/api/paiements' })
-// await fastify.register(avancesRoutes, { prefix: '/api/avances' })
-// await fastify.register(catalogueRoutes, { prefix: '/api/catalogue' })
-// await fastify.register(planningRoutes, { prefix: '/api/planning' })
-// await fastify.register(reglagesRoutes, { prefix: '/api/reglages' })
+// Admin — maintenance ✓
+await fastify.register(adminRoutes, { prefix: '/api/admin' })
 
 // Démarrage
 const port = parseInt(process.env.PORT ?? '3000', 10)

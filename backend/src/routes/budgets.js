@@ -1,17 +1,23 @@
 /**
- * Routes CRUD Budgets de chantier (admin only)
+ * Routes CRUD Budgets Lieu (admin only)
  *
  * Endpoints (préfixe /api/budgets) :
- *   POST   /                 → créer un versement / remboursement
- *   PATCH  /:id              → modifier
- *   DELETE /:id              → supprimer
+ *   POST   /     → créer un versement / remboursement
+ *   PATCH  /:id  → modifier
+ *   DELETE /:id  → supprimer
  *
- * Le `GET /api/chantiers/:id/budgets` (liste pour un chantier) est défini
- * dans routes/chantiersExtensions.js pour rester collé au préfixe /chantiers.
+ * La LECTURE des budgets d'un lieu se fait via
+ * GET /api/lieux/:id/budgets (défini dans routes/compta.js sous le
+ * préfixe /api/lieux pour rester collé au domaine Lieu).
+ *
+ * Refonte Lieu/Poste (session 2026-05-18) :
+ *   - `chantierId` → `lieuId` (obligatoire)
+ *   - `posteId` optionnel : permet d'affecter un versement à un Poste
+ *     précis (vérification que le Poste appartient bien au Lieu)
  *
  * Types :
- *   - VERSEMENT     : Dominique donne du cash à Rachid en début de chantier
- *   - REMBOURSEMENT : Dominique rembourse une avance personnelle de Rachid
+ *   - VERSEMENT     : Dominique donne du cash à Rachid pour démarrer
+ *   - REMBOURSEMENT : Dominique rembourse une avance personnelle Rachid
  */
 
 import { z } from 'zod'
@@ -22,7 +28,8 @@ const prisma = new PrismaClient()
 const TYPES_VALIDES = ['VERSEMENT', 'REMBOURSEMENT']
 
 const schemaCreation = z.object({
-  chantierId: z.number().int().positive('Chantier requis.'),
+  lieuId: z.number().int().positive('Lieu requis.'),
+  posteId: z.number().int().positive().optional().nullable(),
   userId: z.number().int().positive('Destinataire requis.'),
   date: z.string().datetime().optional(),
   montantCentimes: z.number().int().positive('Le montant doit être supérieur à 0.'),
@@ -31,6 +38,7 @@ const schemaCreation = z.object({
 })
 
 const schemaModification = z.object({
+  posteId: z.number().int().positive().optional().nullable(),
   date: z.string().datetime().optional(),
   montantCentimes: z.number().int().positive().optional(),
   type: z.enum(TYPES_VALIDES).optional(),
@@ -40,7 +48,28 @@ const schemaModification = z.object({
 const includesBudget = {
   user: { select: { id: true, prenom: true, nom: true, role: true } },
   creePar: { select: { id: true, prenom: true, nom: true } },
-  chantier: { select: { id: true, numero: true, titre: true } },
+  lieu: { select: { id: true, reference: true, nom: true } },
+  poste: { select: { id: true, titre: true } },
+}
+
+/**
+ * Vérifie qu'un Poste appartient bien au Lieu indiqué.
+ * Si posteId est null/undefined, OK (affectation optionnelle).
+ */
+async function verifierPosteDuLieu(posteId, lieuId, reply) {
+  if (!posteId) return true
+  const poste = await prisma.poste.findUnique({
+    where: { id: posteId },
+    select: { lieuId: true },
+  })
+  if (!poste || poste.lieuId !== lieuId) {
+    reply.code(400).send({
+      error: 'POSTE_INVALIDE',
+      message: 'Le poste sélectionné n\'appartient pas à ce lieu.',
+    })
+    return false
+  }
+  return true
 }
 
 export default async function routes(fastify) {
@@ -63,13 +92,16 @@ export default async function routes(fastify) {
       }
 
       // Vérifs d'existence
-      const chantier = await prisma.chantier.findUnique({ where: { id: data.chantierId } })
-      if (!chantier) {
+      const lieu = await prisma.lieu.findUnique({ where: { id: data.lieuId } })
+      if (!lieu) {
         return reply.code(400).send({
-          error: 'CHANTIER_INVALIDE',
-          message: 'Le chantier sélectionné n\'existe pas.',
+          error: 'LIEU_INVALIDE',
+          message: 'Le lieu sélectionné n\'existe pas.',
         })
       }
+
+      const posteOK = await verifierPosteDuLieu(data.posteId, data.lieuId, reply)
+      if (!posteOK) return
 
       const destinataire = await prisma.utilisateur.findUnique({ where: { id: data.userId } })
       if (!destinataire) {
@@ -79,9 +111,10 @@ export default async function routes(fastify) {
         })
       }
 
-      const budget = await prisma.budgetChantier.create({
+      const budget = await prisma.budgetLieu.create({
         data: {
-          chantierId: data.chantierId,
+          lieuId: data.lieuId,
+          posteId: data.posteId ?? null,
           userId: data.userId,
           date: data.date ? new Date(data.date) : new Date(),
           montantCentimes: data.montantCentimes,
@@ -122,7 +155,7 @@ export default async function routes(fastify) {
         })
       }
 
-      const existant = await prisma.budgetChantier.findUnique({ where: { id } })
+      const existant = await prisma.budgetLieu.findUnique({ where: { id } })
       if (!existant) {
         return reply.code(404).send({
           error: 'BUDGET_INTROUVABLE',
@@ -130,12 +163,18 @@ export default async function routes(fastify) {
         })
       }
 
+      // Si posteId est modifié, vérifier qu'il appartient au même Lieu
+      if ('posteId' in data && data.posteId) {
+        const posteOK = await verifierPosteDuLieu(data.posteId, existant.lieuId, reply)
+        if (!posteOK) return
+      }
+
       const updateData = { ...data }
       if ('date' in updateData) {
         updateData.date = updateData.date ? new Date(updateData.date) : existant.date
       }
 
-      const budget = await prisma.budgetChantier.update({
+      const budget = await prisma.budgetLieu.update({
         where: { id },
         data: updateData,
         include: includesBudget,
@@ -160,7 +199,7 @@ export default async function routes(fastify) {
         })
       }
 
-      const existant = await prisma.budgetChantier.findUnique({ where: { id } })
+      const existant = await prisma.budgetLieu.findUnique({ where: { id } })
       if (!existant) {
         return reply.code(404).send({
           error: 'BUDGET_INTROUVABLE',
@@ -168,7 +207,7 @@ export default async function routes(fastify) {
         })
       }
 
-      await prisma.budgetChantier.delete({ where: { id } })
+      await prisma.budgetLieu.delete({ where: { id } })
 
       return reply.code(204).send()
     },
