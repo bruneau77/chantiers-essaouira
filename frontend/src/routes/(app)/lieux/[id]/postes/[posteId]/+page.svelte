@@ -41,6 +41,16 @@
 	let envoiPaiementEnCours = $state(false);
 	let erreurPaiement = $state('');
 
+	// Édition / suppression d'un paiement (admin uniquement)
+	let paiementEdite = $state(null); // paiement en cours d'édition (null = modale fermée)
+	let editDate = $state('');
+	let editMontantDh = $state('');
+	let editMode = $state('VIREMENT');
+	let editDescription = $state('');
+	let editEnCours = $state(false);
+	let erreurEdit = $state('');
+	let erreurActionPaiement = $state(''); // erreur de suppression, affichée dans la section
+
 	// État transition statut
 	let transitionEnCours = $state(false);
 	let erreurTransition = $state('');
@@ -174,6 +184,73 @@
 			erreurPaiement = 'Impossible de contacter le serveur.';
 		} finally {
 			envoiPaiementEnCours = false;
+		}
+	}
+
+	// --- Édition d'un paiement (modale, admin uniquement) ---
+	function ouvrirEditionPaiement(p) {
+		erreurActionPaiement = '';
+		erreurEdit = '';
+		paiementEdite = p;
+		editDate = new Date(p.date).toISOString().slice(0, 10);
+		editMontantDh = String(p.montantCentimes / 100);
+		editMode = p.mode;
+		editDescription = p.description ?? '';
+	}
+
+	function fermerEditionPaiement() {
+		paiementEdite = null;
+	}
+
+	async function enregistrerEditionPaiement() {
+		erreurEdit = '';
+		const montant = Number(editMontantDh);
+		if (!Number.isFinite(montant) || montant <= 0) {
+			erreurEdit = 'Le montant doit être un nombre positif.';
+			return;
+		}
+		editEnCours = true;
+		try {
+			const res = await apiAuth(`/api/paiements/${paiementEdite.id}`, {
+				method: 'PATCH',
+				body: JSON.stringify({
+					date: new Date(editDate + 'T12:00:00').toISOString(),
+					montantCentimes: Math.round(montant * 100),
+					mode: editMode,
+					description: editDescription.trim() || null
+				})
+			});
+			if (!res.ok) {
+				const p = await res.json();
+				erreurEdit = p.message || 'Erreur lors de la modification.';
+				return;
+			}
+			paiementEdite = null;
+			await chargerTout();
+		} catch {
+			erreurEdit = 'Impossible de contacter le serveur.';
+		} finally {
+			editEnCours = false;
+		}
+	}
+
+	// --- Suppression d'un paiement (admin uniquement) ---
+	async function supprimerPaiement(p) {
+		if (!confirm(`Supprimer ce paiement de ${formaterDh(p.montantCentimes)} ? Cette action est irréversible.`)) return;
+		erreurActionPaiement = '';
+		try {
+			const res = await apiAuth(`/api/paiements/${p.id}`, {
+				method: 'DELETE',
+				body: JSON.stringify({})
+			});
+			if (res.status === 204) {
+				await chargerTout();
+				return;
+			}
+			const payload = await res.json();
+			erreurActionPaiement = payload.message || 'Erreur lors de la suppression.';
+		} catch {
+			erreurActionPaiement = 'Impossible de contacter le serveur.';
 		}
 	}
 
@@ -317,6 +394,8 @@
 				</div>
 			{/if}
 
+			{#if erreurActionPaiement}<p class="erreur">{erreurActionPaiement}</p>{/if}
+
 			{#if modeAjoutPaiement}
 				<form class="form-paiement" onsubmit={(e) => { e.preventDefault(); enregistrerPaiement(); }}>
 					<div class="boutons-mode">
@@ -353,9 +432,26 @@
 								<span class="mode-label {p.mode}">{p.mode === 'VIREMENT' ? 'Virement' : 'Cash'}</span>
 								<span class="montant">{formaterDh(p.montantCentimes)}</span>
 							</div>
-							<div class="paiement-meta">
-								<span>{formaterDate(p.date)}</span>
-								{#if p.description}<span>· {p.description}</span>{/if}
+							<div class="paiement-bas">
+								<div class="paiement-meta">
+									<span>{formaterDate(p.date)}</span>
+									{#if p.description}<span>· {p.description}</span>{/if}
+								</div>
+								{#if estAdmin}
+									<div class="paiement-actions">
+										<button class="icone-action" onclick={() => ouvrirEditionPaiement(p)} aria-label="Modifier le paiement" title="Modifier">
+											<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+												<path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+												<path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+											</svg>
+										</button>
+										<button class="icone-action danger" onclick={() => supprimerPaiement(p)} aria-label="Supprimer le paiement" title="Supprimer">
+											<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+												<path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 5v6m4-6v6" />
+											</svg>
+										</button>
+									</div>
+								{/if}
 							</div>
 						</div>
 					{/each}
@@ -439,6 +535,38 @@
 		{/if}
 	{/if}
 </div>
+
+<!-- Modale d'édition d'un paiement (admin uniquement) -->
+{#if paiementEdite}
+	<div class="modale-fond">
+		<div class="modale">
+			<h2 class="modale-titre">Modifier le paiement</h2>
+			<form onsubmit={(e) => { e.preventDefault(); enregistrerEditionPaiement(); }}>
+				<div class="boutons-mode">
+					<button type="button" class:actif={editMode === 'VIREMENT'} onclick={() => (editMode = 'VIREMENT')}>Virement</button>
+					<button type="button" class:actif={editMode === 'CASH'} onclick={() => (editMode = 'CASH')}>Cash</button>
+				</div>
+				<label class="champ">
+					<span class="label">Date</span>
+					<input type="date" bind:value={editDate} required />
+				</label>
+				<label class="champ">
+					<span class="label">Montant (DH)</span>
+					<input type="number" inputmode="decimal" min="0.01" step="0.01" bind:value={editMontantDh} required />
+				</label>
+				<label class="champ">
+					<span class="label">Description (optionnel)</span>
+					<input type="text" bind:value={editDescription} maxlength="500" />
+				</label>
+				{#if erreurEdit}<p class="erreur">{erreurEdit}</p>{/if}
+				<div class="actions">
+					<button type="button" class="bouton-secondaire" onclick={fermerEditionPaiement} disabled={editEnCours}>Annuler</button>
+					<button type="submit" class="bouton-primaire" disabled={editEnCours}>{editEnCours ? 'Enregistrement…' : 'Enregistrer'}</button>
+				</div>
+			</form>
+		</div>
+	</div>
+{/if}
 
 <style>
 	.page { padding: var(--esp-lg); padding-bottom: calc(var(--hauteur-nav) + var(--safe-bas) + var(--esp-xxl)); }
@@ -568,6 +696,19 @@
 		border-radius: var(--rayon-md); padding: var(--esp-md);
 	}
 	.paiement-haut, .mini-haut { display: flex; justify-content: space-between; align-items: baseline; }
+	.paiement-bas {
+		display: flex; justify-content: space-between; align-items: center;
+		gap: var(--esp-sm); margin-top: 4px;
+	}
+	.paiement-actions { display: flex; gap: var(--esp-xs); flex-shrink: 0; }
+	.icone-action {
+		display: inline-flex; align-items: center; justify-content: center;
+		width: 34px; height: 34px; border-radius: var(--rayon-md);
+		border: 1px solid var(--couleur-bordure-forte); background: var(--couleur-fond);
+		color: var(--couleur-texte-secondaire);
+	}
+	.icone-action.danger { color: var(--couleur-erreur); border-color: var(--couleur-erreur); }
+
 	.mode-label {
 		font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 10px;
 		text-transform: uppercase; color: white; letter-spacing: 0.04em;
@@ -575,7 +716,8 @@
 	.mode-label.VIREMENT { background: #1e4d6b; }
 	.mode-label.CASH { background: #2d7a4f; }
 	.montant { font-size: 18px; font-weight: 700; }
-	.paiement-meta, .mini-meta { font-size: 12px; color: var(--couleur-texte-leger); margin-top: 4px; }
+	.paiement-meta, .mini-meta { font-size: 12px; color: var(--couleur-texte-leger); }
+	.mini-meta { margin-top: 4px; }
 	.mini-desc { font-size: 14px; color: var(--couleur-texte); margin: var(--esp-xs) 0; }
 
 	.cat-mini {
@@ -612,6 +754,21 @@
 		font-size: 12px; color: var(--couleur-texte-leger);
 		margin-top: var(--esp-sm); text-align: center;
 	}
+
+	.modale-fond {
+		position: fixed; inset: 0; z-index: 100;
+		background: rgba(0, 0, 0, 0.5);
+		display: flex; align-items: center; justify-content: center;
+		padding: var(--esp-lg);
+	}
+	.modale {
+		background: var(--couleur-fond); border-radius: var(--rayon-md);
+		padding: var(--esp-lg); width: 100%; max-width: 420px;
+		display: flex; flex-direction: column; gap: var(--esp-md);
+		max-height: 90vh; overflow-y: auto;
+	}
+	.modale-titre { font-size: 18px; font-weight: 700; }
+	.modale form { display: flex; flex-direction: column; gap: var(--esp-md); }
 
 	.etat-central { display: flex; flex-direction: column; align-items: center; padding: var(--esp-xxl); }
 	.spinner {
