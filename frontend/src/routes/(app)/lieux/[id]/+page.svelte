@@ -91,7 +91,18 @@
 					{STATUTS_LIEU[lieu.statut]?.label ?? lieu.statut}
 				</span>
 			</div>
-			<h1>{lieu.nom}</h1>
+			<div class="titre-ligne">
+				<h1>{lieu.nom}</h1>
+				{#if estAdmin}
+					<button class="bouton-modifier" onclick={() => goto(`/lieux/${lieu.id}/modifier`)} aria-label="Modifier le lieu">
+						<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+							<path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+							<path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+						</svg>
+						Modifier
+					</button>
+				{/if}
+			</div>
 			<p class="adresse">{lieu.adresse}</p>
 		</header>
 
@@ -260,7 +271,27 @@
 		text-transform: uppercase;
 	}
 
-	h1 { font-size: 24px; font-weight: 700; margin-bottom: var(--esp-xs); }
+	.titre-ligne {
+		display: flex;
+		justify-content: space-between;
+		align-items: flex-start;
+		gap: var(--esp-md);
+		margin-bottom: var(--esp-xs);
+	}
+	h1 { font-size: 24px; font-weight: 700; }
+	.bouton-modifier {
+		display: inline-flex;
+		align-items: center;
+		gap: var(--esp-xs);
+		flex-shrink: 0;
+		font-size: 13px;
+		font-weight: 600;
+		color: var(--couleur-primaire);
+		padding: var(--esp-xs) var(--esp-sm);
+		border: 1.5px solid var(--couleur-primaire);
+		border-radius: var(--rayon-md);
+		background: transparent;
+	}
 	.adresse { font-size: 15px; color: var(--couleur-texte-secondaire); }
 
 	.section { margin-bottom: var(--esp-lg); }
