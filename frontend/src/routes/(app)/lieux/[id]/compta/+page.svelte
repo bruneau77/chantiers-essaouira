@@ -1,7 +1,6 @@
 <script>
 	import { onMount } from 'svelte';
 	import { page } from '$app/stores';
-	import { goto } from '$app/navigation';
 	import { auth, apiAuth } from '$lib/stores/auth.js';
 	import { nomComplet } from '$lib/utils/nom.js';
 	import DepenseRow from '$lib/components/DepenseRow.svelte';
@@ -107,12 +106,12 @@
 </svelte:head>
 
 <div class="page">
-	<button class="bouton-retour" onclick={() => goto(`/lieux/${id}`)}>
+	<a class="bouton-retour" href="/lieux/{id}">
 		<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
 			<path d="M19 12H5M12 19l-7-7 7-7" />
 		</svg>
 		Retour
-	</button>
+	</a>
 
 	{#if chargement}
 		<div class="etat-central"><div class="spinner"></div></div>
@@ -265,6 +264,7 @@
 		color: var(--couleur-primaire);
 		font-weight: 500;
 		margin-bottom: var(--esp-lg);
+		text-decoration: none;
 	}
 
 	.entete { margin-bottom: var(--esp-lg); }
