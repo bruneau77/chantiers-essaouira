@@ -16,6 +16,9 @@
 	const id = $derived(parseInt($page.params.id, 10));
 	const estAdmin = $derived($auth.utilisateur?.role === 'admin');
 
+	// Liste des postes du lieu (pour l'affectation optionnelle d'un budget)
+	let postesLieu = $state([]);
+
 	function formaterDh(c) {
 		if (c === null || c === undefined) return '—';
 		const dh = Math.round(c / 100);
@@ -46,7 +49,21 @@
 		}
 	}
 
-	onMount(charger);
+	async function chargerPostes() {
+		try {
+			const res = await apiAuth(`/api/postes?lieuId=${id}`);
+			if (!res.ok) return;
+			const payload = await res.json();
+			postesLieu = payload.data ?? [];
+		} catch {
+			// silencieux : le dropdown poste reste vide, sans bloquer la page
+		}
+	}
+
+	onMount(() => {
+		charger();
+		chargerPostes();
+	});
 
 	function onDepenseChangee() {
 		modeAjoutDepense = false;
@@ -97,6 +114,85 @@
 			erreurBudget = 'Impossible de contacter le serveur.';
 		} finally {
 			envoiBudgetEnCours = false;
+		}
+	}
+
+	// --- Édition / suppression d'un versement / remboursement (admin uniquement) ---
+	let budgetEdite = $state(null); // budget en cours d'édition (null = modale fermée)
+	let editType = $state('VERSEMENT');
+	let editMontantDh = $state('');
+	let editDate = $state('');
+	let editPosteId = $state('');
+	let editDescription = $state('');
+	let editEnCours = $state(false);
+	let erreurEdit = $state('');
+	let erreurActionBudget = $state(''); // erreur de suppression, affichée dans la section
+
+	function ouvrirEditionBudget(b) {
+		erreurActionBudget = '';
+		erreurEdit = '';
+		budgetEdite = b;
+		editType = b.type;
+		editMontantDh = String(b.montantCentimes / 100);
+		editDate = new Date(b.date).toISOString().slice(0, 10);
+		editPosteId = b.poste?.id != null ? String(b.poste.id) : '';
+		editDescription = b.description ?? '';
+	}
+
+	function fermerEditionBudget() {
+		budgetEdite = null;
+	}
+
+	async function enregistrerEditionBudget() {
+		erreurEdit = '';
+		const montant = Number(editMontantDh);
+		if (!Number.isFinite(montant) || montant <= 0) {
+			erreurEdit = 'Le montant doit être un nombre positif.';
+			return;
+		}
+		editEnCours = true;
+		try {
+			const res = await apiAuth(`/api/budgets/${budgetEdite.id}`, {
+				method: 'PATCH',
+				body: JSON.stringify({
+					type: editType,
+					montantCentimes: Math.round(montant * 100),
+					date: new Date(editDate + 'T12:00:00').toISOString(),
+					posteId: editPosteId ? parseInt(editPosteId, 10) : null,
+					description: editDescription.trim() || null
+				})
+			});
+			if (!res.ok) {
+				const p = await res.json();
+				erreurEdit = p.message || 'Erreur lors de la modification.';
+				return;
+			}
+			budgetEdite = null;
+			await charger();
+		} catch {
+			erreurEdit = 'Impossible de contacter le serveur.';
+		} finally {
+			editEnCours = false;
+		}
+	}
+
+	async function supprimerBudget(b) {
+		const libelle = b.type === 'VERSEMENT' ? 'versement' : 'remboursement';
+		if (!confirm(`Supprimer ce ${libelle} de ${formaterDh(b.montantCentimes)} ? Cette action est irréversible.`)) return;
+		erreurActionBudget = '';
+		try {
+			const res = await apiAuth(`/api/budgets/${b.id}`, {
+				method: 'DELETE',
+				body: JSON.stringify({})
+			});
+			if (res.status === 204) {
+				await charger();
+				return;
+			}
+			const p = await res.json();
+			erreurActionBudget = p.message || 'Erreur lors de la suppression.';
+		} catch {
+			erreurActionBudget = 'Impossible de contacter le serveur.';
 		}
 	}
 </script>
@@ -194,6 +290,8 @@
 				</form>
 			{/if}
 
+			{#if erreurActionBudget}<p class="erreur">{erreurActionBudget}</p>{/if}
+
 			{#if !compta.budgets || compta.budgets.length === 0}
 				<p class="texte-vide">Aucun versement enregistré.</p>
 			{:else}
@@ -204,15 +302,32 @@
 								<span class="type-label">{b.type === 'VERSEMENT' ? 'Versement' : 'Remboursement'}</span>
 								<span class="montant">{formaterDh(b.montantCentimes)}</span>
 							</div>
-							<div class="ligne-budget-meta">
-								<span>{formaterDate(b.date)}</span>
-								{#if b.poste}
-									<span>· Poste : <strong>{b.poste.titre}</strong></span>
-								{:else}
-									<span>· Global au lieu</span>
-								{/if}
-								{#if b.description}
-									<span>· {b.description}</span>
+							<div class="ligne-budget-bas">
+								<div class="ligne-budget-meta">
+									<span>{formaterDate(b.date)}</span>
+									{#if b.poste}
+										<span>· Poste : <strong>{b.poste.titre}</strong></span>
+									{:else}
+										<span>· Global au lieu</span>
+									{/if}
+									{#if b.description}
+										<span>· {b.description}</span>
+									{/if}
+								</div>
+								{#if estAdmin}
+									<div class="budget-actions">
+										<button class="icone-action" onclick={() => ouvrirEditionBudget(b)} aria-label="Modifier" title="Modifier">
+											<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+												<path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+												<path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+											</svg>
+										</button>
+										<button class="icone-action danger" onclick={() => supprimerBudget(b)} aria-label="Supprimer" title="Supprimer">
+											<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+												<path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 5v6m4-6v6" />
+											</svg>
+										</button>
+									</div>
 								{/if}
 							</div>
 						</div>
@@ -252,6 +367,47 @@
 		</section>
 	{/if}
 </div>
+
+<!-- Modale d'édition d'un versement / remboursement (admin uniquement) -->
+{#if budgetEdite}
+	<div class="modale-fond">
+		<div class="modale">
+			<h2 class="modale-titre">Modifier le versement / remboursement</h2>
+			<form onsubmit={(e) => { e.preventDefault(); enregistrerEditionBudget(); }}>
+				<div class="boutons-type">
+					<button type="button" class:actif={editType === 'VERSEMENT'} onclick={() => (editType = 'VERSEMENT')}>Versement</button>
+					<button type="button" class:actif={editType === 'REMBOURSEMENT'} onclick={() => (editType = 'REMBOURSEMENT')}>Remboursement</button>
+				</div>
+				<label class="champ">
+					<span class="label">Montant (DH)</span>
+					<input type="number" inputmode="decimal" min="0.01" step="0.01" bind:value={editMontantDh} required />
+				</label>
+				<label class="champ">
+					<span class="label">Date</span>
+					<input type="date" bind:value={editDate} required />
+				</label>
+				<label class="champ">
+					<span class="label">Affecter à un poste (optionnel)</span>
+					<select bind:value={editPosteId}>
+						<option value="">— Global au lieu —</option>
+						{#each postesLieu as p (p.id)}
+							<option value={String(p.id)}>{p.titre}</option>
+						{/each}
+					</select>
+				</label>
+				<label class="champ">
+					<span class="label">Description (optionnel)</span>
+					<input type="text" bind:value={editDescription} maxlength="500" />
+				</label>
+				{#if erreurEdit}<p class="erreur">{erreurEdit}</p>{/if}
+				<div class="actions">
+					<button type="button" class="bouton-secondaire" onclick={fermerEditionBudget} disabled={editEnCours}>Annuler</button>
+					<button type="submit" class="bouton-primaire" disabled={editEnCours}>{editEnCours ? 'Enregistrement…' : 'Enregistrer'}</button>
+				</div>
+			</form>
+		</div>
+	</div>
+{/if}
 
 <style>
 	.page { padding: var(--esp-lg); padding-bottom: calc(var(--hauteur-nav) + var(--safe-bas) + var(--esp-xxl)); }
@@ -322,9 +478,10 @@
 
 	.champ { display: flex; flex-direction: column; gap: var(--esp-xs); }
 	.label { font-size: 13px; font-weight: 600; color: var(--couleur-texte-secondaire); }
-	.champ input {
+	.champ input, .champ select {
 		padding: var(--esp-md); border: 1px solid var(--couleur-bordure-forte);
 		border-radius: var(--rayon-md); font-size: 16px; min-height: var(--taille-tactile);
+		background: var(--couleur-fond); font-family: inherit;
 	}
 
 	.erreur {
@@ -357,7 +514,19 @@
 	.ligne-budget-haut { display: flex; justify-content: space-between; align-items: baseline; }
 	.type-label { font-size: 12px; font-weight: 700; text-transform: uppercase; color: var(--couleur-texte-secondaire); letter-spacing: 0.04em; }
 	.montant { font-size: 18px; font-weight: 700; color: var(--couleur-texte); }
-	.ligne-budget-meta { font-size: 12px; color: var(--couleur-texte-leger); margin-top: 4px; display: flex; flex-wrap: wrap; gap: 4px; }
+	.ligne-budget-bas {
+		display: flex; justify-content: space-between; align-items: center;
+		gap: var(--esp-sm); margin-top: 4px;
+	}
+	.ligne-budget-meta { font-size: 12px; color: var(--couleur-texte-leger); display: flex; flex-wrap: wrap; gap: 4px; }
+	.budget-actions { display: flex; gap: var(--esp-xs); flex-shrink: 0; }
+	.icone-action {
+		display: inline-flex; align-items: center; justify-content: center;
+		width: 34px; height: 34px; border-radius: var(--rayon-md);
+		border: 1px solid var(--couleur-bordure-forte); background: var(--couleur-fond);
+		color: var(--couleur-texte-secondaire);
+	}
+	.icone-action.danger { color: var(--couleur-erreur); border-color: var(--couleur-erreur); }
 
 	.liste-depenses { display: flex; flex-direction: column; gap: var(--esp-sm); }
 
@@ -365,6 +534,21 @@
 		font-size: 14px; color: var(--couleur-texte-leger); font-style: italic;
 		padding: var(--esp-md); text-align: center;
 	}
+
+	.modale-fond {
+		position: fixed; inset: 0; z-index: 100;
+		background: rgba(0, 0, 0, 0.5);
+		display: flex; align-items: center; justify-content: center;
+		padding: var(--esp-lg);
+	}
+	.modale {
+		background: var(--couleur-fond); border-radius: var(--rayon-md);
+		padding: var(--esp-lg); width: 100%; max-width: 420px;
+		display: flex; flex-direction: column; gap: var(--esp-md);
+		max-height: 90vh; overflow-y: auto;
+	}
+	.modale-titre { font-size: 18px; font-weight: 700; }
+	.modale form { display: flex; flex-direction: column; gap: var(--esp-md); }
 
 	.etat-central { display: flex; flex-direction: column; align-items: center; padding: var(--esp-xxl); }
 	.spinner {
